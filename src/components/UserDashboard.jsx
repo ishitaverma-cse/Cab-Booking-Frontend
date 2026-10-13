@@ -1,11 +1,65 @@
-import { useEffect, useState } from 'react'
-import { UserButton, useUser } from '@clerk/clerk-react'
+import { useEffect, useState, useRef } from 'react'
+import { UserButton, useUser, useAuth } from '@clerk/clerk-react'
 import ProfileEditor from './ProfileEditor'
 import LocationPicker from '../components/LocationPicker'
 import RideOptions from '../components/RideOptions'
 
+async function searchAddresses(query, signal) {
+    const trimmedQuery = query.trim()
+
+    if (trimmedQuery.length < 3) return []
+
+    const url = new URL('https://photon.komoot.io/api/')
+
+    url.search = new URLSearchParams({
+        q: trimmedQuery,
+        limit: '5',
+        lang: 'en',
+    }).toString()
+
+    const response = await fetch(url.toString(), { signal })
+
+    if (!response.ok) {
+        throw new Error('Address search is temporarily unavailable.')
+    }
+
+    const result = await response.json()
+
+    return (result.features || [])
+        .map(feature => {
+            const properties = feature.properties || {}
+            const [longitude, latitude] = feature.geometry.coordinates
+
+            const street = [
+                properties.housenumber,
+                properties.street,
+            ].filter(Boolean).join(' ')
+
+            const label = [
+                properties.name,
+                street,
+                properties.suburb,
+                properties.city || properties.town || properties.village,
+                properties.district,
+                properties.state,
+                properties.country,
+            ]
+                .filter(Boolean)
+                .filter((value, index, values) => values.indexOf(value) === index)
+                .join(', ')
+
+            return {
+                label,
+                latitude,
+                longitude,
+            }
+        })
+        .filter(address => address.label)
+}
+
 function UserDashboard() {
     const { user } = useUser()
+    const { getToken } = useAuth()
 
     const [isProfileEditorOpen, setIsProfileEditorOpen] = useState(false)
     const firstName = user?.firstName || 'there'
@@ -15,6 +69,10 @@ function UserDashboard() {
     const [pickupCoordinates, setPickupCoordinates] = useState(null)
     const [destinationCoordinates, setDestinationCoordinates] = useState(null)
     const [routeInfo, setRouteInfo] = useState(null)
+
+    const [pickupSuggestions, setPickupSuggestions] = useState([])
+    const [destinationSuggestions, setDestinationSuggestions] = useState([])
+    const [activeLocationField, setActiveLocationField] = useState('')
 
     const API_URL = (
         import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
@@ -35,6 +93,85 @@ function UserDashboard() {
         startIndex + RIDES_PER_PAGE
     )
     const [toast, setToast] = useState('')
+    const [isClearNotificationsModalOpen, setIsClearNotificationsModalOpen] = useState(false)
+
+    const [notifications, setNotifications] = useState([])
+    const [isNotificationOpen, setIsNotificationOpen] = useState(false)
+
+    const unreadCount = notifications.filter(
+        notification => !notification.read
+    ).length
+
+    const notificationPanelRef = useRef(null)
+
+    useEffect(() => {
+        function handleOutsideClick(event) {
+            if (
+                notificationPanelRef.current &&
+                !notificationPanelRef.current.contains(event.target)
+            ) {
+                setIsNotificationOpen(false)
+            }
+        }
+
+        document.addEventListener('mousedown', handleOutsideClick)
+
+        return () => {
+            document.removeEventListener('mousedown', handleOutsideClick)
+        }
+    }, [])
+
+
+    useEffect(() => {
+        if (!activeLocationField) {
+            setPickupSuggestions([])
+            setDestinationSuggestions([])
+            return
+        }
+
+        const query =
+            activeLocationField === 'pickup' ? pickup : destination
+
+        if (query.trim().length < 3) {
+            if (activeLocationField === 'pickup') {
+                setPickupSuggestions([])
+            } else {
+                setDestinationSuggestions([])
+            }
+
+            return
+        }
+
+        const controller = new AbortController()
+
+        const timer = setTimeout(async () => {
+            try {
+                const results = await searchAddresses(
+                    query,
+                    controller.signal
+                )
+
+                if (activeLocationField === 'pickup') {
+                    setPickupSuggestions(results)
+                } else {
+                    setDestinationSuggestions(results)
+                }
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    if (activeLocationField === 'pickup') {
+                        setPickupSuggestions([])
+                    } else {
+                        setDestinationSuggestions([])
+                    }
+                }
+            }
+        }, 350)
+
+        return () => {
+            clearTimeout(timer)
+            controller.abort()
+        }
+    }, [pickup, destination, activeLocationField])
 
     useEffect(() => {
         if (!toast) return
@@ -43,6 +180,7 @@ function UserDashboard() {
         return () => clearTimeout(timer)
     }, [toast])
 
+
     useEffect(() => {
         if (!user?.id) {
             setRidesLoading(false)
@@ -50,14 +188,29 @@ function UserDashboard() {
         }
 
         let cancelled = false
+        let isFirstFetch = true
+        let isFetching = false
+        let knownStatuses = {}
 
         async function fetchRides() {
-            setRidesLoading(true)
-            setRidesError('')
+            if (isFetching || cancelled) return
+
+            isFetching = true
+
+            if (isFirstFetch) {
+                setRidesLoading(true)
+            }
 
             try {
+                const token = await getToken()
+
                 const response = await fetch(
-                    `${API_URL}/rides?clerk_id=${encodeURIComponent(user.id)}`
+                    `${API_URL}/rides?clerk_id=${encodeURIComponent(user.id)}`,
+                    {
+                        headers: {
+                            Authorization: `Bearer ${token}`,
+                        },
+                    }
                 )
 
                 const contentType = response.headers.get('content-type') || ''
@@ -76,23 +229,64 @@ function UserDashboard() {
                     )
                 }
 
-                if (!cancelled) {
-                    setRides(result.data || [])
+                if (cancelled) return
+
+                const latestRides = result.data || []
+
+                // Notify only when a previously loaded ride changes status.
+                if (!isFirstFetch) {
+                    const changedRide = latestRides.find(
+                        ride =>
+                            knownStatuses[ride.id] !== undefined &&
+                            knownStatuses[ride.id] !== ride.status
+                    )
+
+                    if (changedRide) {
+                        setToast(
+                            `Ride status updated: ${(
+                                changedRide.status || 'unknown'
+                            ).replaceAll('_', ' ')}`
+                        )
+                    }
+                }
+
+                // Save the latest status of every ride.
+                knownStatuses = Object.fromEntries(
+                    latestRides.map(ride => [ride.id, ride.status])
+                )
+
+                setRides(latestRides)
+                setRidesError('')
+
+                if (isFirstFetch) {
                     setCurrentRidePage(1)
                 }
+
+                isFirstFetch = false
             } catch (error) {
-                if (!cancelled) setRidesError(error.message)
+                if (!cancelled) {
+                    setRidesError(error.message)
+                }
             } finally {
-                if (!cancelled) setRidesLoading(false)
+                isFetching = false
+
+                if (!cancelled) {
+                    setRidesLoading(false)
+                }
             }
         }
 
         fetchRides()
 
+        // Check for ride-status changes every 10 seconds.
+        const interval = setInterval(fetchRides, 10000)
+
         return () => {
             cancelled = true
+            clearInterval(interval)
         }
     }, [user?.id])
+
 
     function handleRideBooked(ride) {
         if (!ride) return
@@ -105,6 +299,335 @@ function UserDashboard() {
         setCurrentRidePage(1)
         setToast('Ride requested successfully!')
     }
+
+
+    function handleSelectLocation(field, suggestion) {
+        const coordinates = {
+            lat: suggestion.latitude,
+            lng: suggestion.longitude,
+        }
+
+        if (field === 'pickup') {
+            setPickup(suggestion.label)
+            setPickupCoordinates(coordinates)
+        } else {
+            setDestination(suggestion.label)
+            setDestinationCoordinates(coordinates)
+        }
+
+        setActiveLocationField('')
+        setPickupSuggestions([])
+        setDestinationSuggestions([])
+        setRouteInfo(null)
+    }
+
+
+    useEffect(() => {
+        if (!user?.id) return
+
+        const controller = new AbortController()
+
+        async function connectToRideStream() {
+            try {
+                const token = await getToken()
+
+                if (!token) {
+                    console.error('Ride stream: Clerk token unavailable.')
+                    return
+                }
+
+                const response = await fetch(`${API_URL}/rides/stream`, {
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        Accept: 'text/event-stream',
+                    },
+                    signal: controller.signal,
+                })
+
+                if (!response.ok || !response.body) {
+                    throw new Error(
+                        `Ride stream failed (HTTP ${response.status}).`
+                    )
+                }
+
+                console.log('Ride stream: connected to the response.')
+
+                const reader = response.body.getReader()
+                const decoder = new TextDecoder()
+                let buffer = ''
+
+                while (true) {
+                    const { value, done } = await reader.read()
+
+                    if (done) break
+
+                    buffer += decoder.decode(value, { stream: true })
+
+                    const events = buffer.split('\n\n')
+                    buffer = events.pop() || ''
+
+                    for (const eventText of events) {
+                        const eventName = eventText
+                            .split('\n')
+                            .find(line => line.startsWith('event:'))
+                            ?.slice(6)
+                            .trim()
+
+                        const dataLine = eventText
+                            .split('\n')
+                            .find(line => line.startsWith('data:'))
+
+
+                        if (eventName === 'ride_status' && dataLine) {
+                            const ride = JSON.parse(dataLine.slice(5).trim())
+
+                            setRides(previousRides => {
+                                const rideExists = previousRides.some(
+                                    item => item.id === ride.id
+                                )
+
+                                if (!rideExists) {
+                                    return [ride, ...previousRides]
+                                }
+
+                                return previousRides.map(item =>
+                                    item.id === ride.id
+                                        ? { ...item, ...ride }
+                                        : item
+                                )
+                            })
+
+                            const status = (ride.status || 'unknown').replaceAll('_', ' ')
+
+
+                            const notificationToken = await getToken()
+
+                            const notificationResponse = await fetch(
+                                `${API_URL}/notifications`,
+                                {
+                                    headers: {
+                                        Authorization: `Bearer ${notificationToken}`,
+                                    },
+                                }
+                            )
+
+                            if (notificationResponse.ok) {
+                                const notificationResult = await notificationResponse.json()
+
+                                if (notificationResult.success) {
+                                    setNotifications(
+                                        (notificationResult.data || []).map(notification => ({
+                                            id: notification.id,
+                                            rideId: notification.ride_id,
+                                            message: notification.message,
+                                            status: notification.status,
+                                            createdAt: notification.created_at,
+                                            read: notification.is_read,
+                                        }))
+                                    )
+                                }
+                            }
+                            setToast(`Ride status updated: ${status}`)
+
+                        }
+
+                        if (eventName === 'stream_error') {
+                            console.error('Ride stream reported an error:', dataLine)
+                        }
+                    }
+                }
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    console.error('Ride stream error:', error)
+                }
+            }
+        }
+
+        connectToRideStream()
+
+        return () => controller.abort()
+    }, [user?.id, getToken])
+
+
+    useEffect(() => {
+        if (!user?.id) return
+
+        let cancelled = false
+
+        async function loadNotifications() {
+            try {
+                const token = await getToken()
+
+                const response = await fetch(`${API_URL}/notifications`, {
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                    },
+                })
+
+                const result = await response.json()
+
+                if (!response.ok || !result.success) {
+                    throw new Error(
+                        result.message || 'Unable to load notifications.'
+                    )
+                }
+
+                if (!cancelled) {
+                    setNotifications(
+                        (result.data || []).map(notification => ({
+                            id: notification.id,
+                            rideId: notification.ride_id,
+                            message: notification.message,
+                            status: notification.status,
+                            createdAt: notification.created_at,
+                            read: notification.is_read,
+                        }))
+                    )
+                }
+            } catch (error) {
+                if (!cancelled) {
+                    console.error('Load notifications error:', error)
+                }
+            }
+        }
+
+        loadNotifications()
+
+        return () => {
+            cancelled = true
+        }
+    }, [user?.id, getToken])
+
+
+    async function markNotificationAsRead(notificationId) {
+        try {
+            const token = await getToken()
+
+            const response = await fetch(
+                `${API_URL}/notifications/${notificationId}/read`,
+                {
+                    method: 'PATCH',
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                    },
+                }
+            )
+
+            const result = await response.json()
+
+            if (!response.ok || !result.success) {
+                throw new Error(result.message || 'Unable to mark as read.')
+            }
+
+            setNotifications(previous =>
+                previous.map(notification =>
+                    notification.id === notificationId
+                        ? { ...notification, read: true }
+                        : notification
+                )
+            )
+        } catch (error) {
+            console.error('Mark notification as read error:', error)
+            setToast('Could not update notification. Please try again.')
+        }
+    }
+
+    async function markAllNotificationsAsRead() {
+        const unreadNotifications = notifications.filter(
+            notification => !notification.read
+        )
+
+        try {
+            await Promise.all(
+                unreadNotifications.map(async notification => {
+                    const token = await getToken()
+
+                    const response = await fetch(
+                        `${API_URL}/notifications/${notification.id}/read`,
+                        {
+                            method: 'PATCH',
+                            headers: {
+                                Authorization: `Bearer ${token}`,
+                            },
+                        }
+                    )
+
+                    const result = await response.json()
+
+                    if (!response.ok || !result.success) {
+                        throw new Error('Unable to mark all notifications as read.')
+                    }
+                })
+            )
+
+            setNotifications(previous =>
+                previous.map(notification => ({
+                    ...notification,
+                    read: true,
+                }))
+            )
+        } catch (error) {
+            console.error('Mark all notifications as read error:', error)
+            setToast('Some notifications could not be updated.')
+        }
+    }
+
+    async function deleteNotification(notificationId) {
+        try {
+            const token = await getToken()
+
+            const response = await fetch(
+                `${API_URL}/notifications/${notificationId}`,
+                {
+                    method: 'DELETE',
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                    },
+                }
+            )
+
+            const result = await response.json()
+
+            if (!response.ok || !result.success) {
+                throw new Error(result.message || 'Unable to delete notification.')
+            }
+
+            setNotifications(previous =>
+                previous.filter(notification => notification.id !== notificationId)
+            )
+        } catch (error) {
+            console.error('Delete notification error:', error)
+            setToast('Could not delete notification. Please try again.')
+        }
+    }
+
+    async function clearAllNotifications() {
+        try {
+            const token = await getToken()
+
+            const response = await fetch(`${API_URL}/notifications`, {
+                method: 'DELETE',
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+            })
+
+            const result = await response.json()
+
+            if (!response.ok || !result.success) {
+                throw new Error(
+                    result.message || 'Unable to clear notifications.'
+                )
+            }
+
+            setNotifications([])
+            setToast('All notifications cleared successfully.')
+        } catch (error) {
+            console.error('Clear notifications error:', error)
+            setToast('Could not clear notifications. Please try again.')
+        }
+    }
+
 
     return (
         <div className="min-h-screen bg-[#f5f8ff] text-slate-800">
@@ -128,6 +651,7 @@ function UserDashboard() {
                 </div>
             )}
 
+
             {/* Navbar */}
             <header className="sticky top-0 z-10 border-b border-blue-100 bg-white/90 backdrop-blur-xl">
                 <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
@@ -142,6 +666,177 @@ function UserDashboard() {
                         <span className="hidden text-sm text-slate-500 sm:block">
                             Welcome back, {firstName}
                         </span>
+
+                        {/* Notifications */}
+                        <div className="relative" ref={notificationPanelRef}>
+                            <button
+                                type="button"
+                                onClick={() => setIsNotificationOpen(previous => !previous)}
+                                className="relative flex h-10 w-10 items-center justify-center rounded-xl border border-blue-100 bg-white text-slate-600 transition hover:bg-blue-50 hover:text-blue-600"
+                                aria-label={`Notifications${unreadCount ? `, ${unreadCount} unread` : ''}`}
+                            >
+                                <svg
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="1.8"
+                                    className="h-5 w-5"
+                                >
+                                    <path
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"
+                                    />
+                                </svg>
+
+                                {unreadCount > 0 && (
+                                    <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-blue-600 px-1 text-[10px] font-bold text-white ring-2 ring-white">
+                                        {unreadCount > 9 ? '9+' : unreadCount}
+                                    </span>
+                                )}
+                            </button>
+
+                            {isNotificationOpen && (
+                                <div className="absolute right-0 top-12 z-50 w-80 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl sm:w-96">
+                                    <div className="flex items-center justify-between border-b border-slate-100 px-4 py-4">
+                                        <div>
+                                            <h3 className="font-bold text-slate-900">
+                                                Notifications
+                                            </h3>
+                                            <p className="mt-0.5 text-xs text-slate-500">
+                                                {unreadCount} unread
+                                            </p>
+                                        </div>
+
+                                        {unreadCount > 0 && (
+                                            <button
+                                                type="button"
+                                                onClick={markAllNotificationsAsRead}
+                                                className="text-xs font-semibold text-blue-600 hover:text-blue-700"
+                                            >
+                                                Mark all as read
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    <div className="max-h-80 overflow-y-auto">
+                                        {notifications.length === 0 ? (
+                                            <div className="px-5 py-10 text-center">
+                                                <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-blue-50 text-blue-600">
+                                                    <svg
+                                                        xmlns="http://www.w3.org/2000/svg"
+                                                        viewBox="0 0 24 24"
+                                                        fill="none"
+                                                        stroke="currentColor"
+                                                        strokeWidth="1.8"
+                                                        className="h-6 w-6"
+                                                    >
+                                                        <path
+                                                            strokeLinecap="round"
+                                                            strokeLinejoin="round"
+                                                            d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"
+                                                        />
+                                                    </svg>
+                                                </div>
+                                                <p className="text-sm font-semibold text-slate-700">
+                                                    You're all caught up!
+                                                </p>
+                                                <p className="mt-1 text-xs text-slate-500">
+                                                    Ride updates will appear here.
+                                                </p>
+                                            </div>
+                                        ) : (
+                                            notifications.map(notification => (
+                                                <div
+                                                    key={notification.id}
+                                                    className={`flex gap-3 border-b border-slate-100 px-4 py-4 transition hover:bg-blue-50/60 ${notification.read ? 'bg-white' : 'bg-blue-50/50'
+                                                        }`}
+                                                >
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => markNotificationAsRead(notification.id)}
+                                                        className="flex min-w-0 flex-1 gap-3 text-left"
+                                                        aria-label={`Mark notification as read: ${notification.message}`}
+                                                    >
+                                                        <span className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
+                                                            <svg
+                                                                xmlns="http://www.w3.org/2000/svg"
+                                                                viewBox="0 0 24 24"
+                                                                fill="none"
+                                                                stroke="currentColor"
+                                                                strokeWidth="1.8"
+                                                                className="h-4 w-4"
+                                                            >
+                                                                <path
+                                                                    strokeLinecap="round"
+                                                                    strokeLinejoin="round"
+                                                                    d="M5 12h14M13 6l6 6-6 6"
+                                                                />
+                                                            </svg>
+                                                        </span>
+
+                                                        <span className="min-w-0 flex-1">
+                                                            <span className="block text-sm font-medium text-slate-800">
+                                                                {notification.message}
+                                                            </span>
+
+                                                            <span className="mt-1 block text-xs text-slate-400">
+                                                                {new Date(notification.createdAt).toLocaleTimeString([], {
+                                                                    hour: '2-digit',
+                                                                    minute: '2-digit',
+                                                                })}
+                                                            </span>
+                                                        </span>
+
+                                                        {!notification.read && (
+                                                            <span className="mt-2 h-2 w-2 shrink-0 rounded-full bg-blue-600" />
+                                                        )}
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => deleteNotification(notification.id)}
+                                                        aria-label="Delete notification"
+                                                        title="Delete notification"
+                                                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600"
+                                                    >
+                                                        <svg
+                                                            xmlns="http://www.w3.org/2000/svg"
+                                                            viewBox="0 0 24 24"
+                                                            fill="none"
+                                                            stroke="currentColor"
+                                                            strokeWidth="1.8"
+                                                            className="h-4 w-4"
+                                                        >
+                                                            <path
+                                                                strokeLinecap="round"
+                                                                strokeLinejoin="round"
+                                                                d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m4 4v6m6-6v6"
+                                                            />
+                                                        </svg>
+                                                    </button>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+
+
+                                    {notifications.length > 0 && (
+                                        <div className="border-t border-slate-100 px-4 py-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => setIsClearNotificationsModalOpen(true)}
+                                                className="w-full rounded-xl px-3 py-2 text-sm font-semibold text-red-600 transition hover:bg-red-50"
+                                            >
+                                                Clear all notifications
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
                         <UserButton />
                     </div>
                 </div>
@@ -216,7 +911,7 @@ function UserDashboard() {
                                     ●
                                 </div>
 
-                                <div className="flex-1">
+                                <div className="relative flex-1">
                                     <label
                                         htmlFor="pickup"
                                         className="mb-2 block text-sm font-medium text-slate-700"
@@ -227,13 +922,40 @@ function UserDashboard() {
                                         id="pickup"
                                         type="text"
                                         value={pickup}
+                                        onFocus={() => setActiveLocationField('pickup')}
                                         onChange={event => {
                                             setPickup(event.target.value)
+                                            setPickupCoordinates(null)
                                             setRouteInfo(null)
+                                            setActiveLocationField('pickup')
                                         }}
                                         placeholder="Enter your pickup location"
                                         className="w-full rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-500/10"
                                     />
+
+
+                                    {activeLocationField === 'pickup' &&
+                                        pickupSuggestions.length > 0 && (
+                                            <div className="absolute left-0 right-0 top-full z-50 mt-2 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
+                                                {pickupSuggestions.map((suggestion, index) => (
+                                                    <button
+                                                        key={`${suggestion.label}-${index}`}
+                                                        type="button"
+                                                        onMouseDown={event => event.preventDefault()}
+                                                        onClick={() =>
+                                                            handleSelectLocation('pickup', suggestion)
+                                                        }
+                                                        className="flex w-full items-start gap-3 rounded-lg px-3 py-3 text-left transition hover:bg-blue-50"
+                                                    >
+                                                        <span className="mt-0.5 text-blue-600">●</span>
+                                                        <span className="text-sm text-slate-700">
+                                                            {suggestion.label}
+                                                        </span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+
                                 </div>
                             </div>
 
@@ -244,7 +966,7 @@ function UserDashboard() {
                                     ◆
                                 </div>
 
-                                <div className="flex-1">
+                                <div className="relative flex-1">
                                     <label
                                         htmlFor="destination"
                                         className="mb-2 block text-sm font-medium text-slate-700"
@@ -255,25 +977,58 @@ function UserDashboard() {
                                         id="destination"
                                         type="text"
                                         value={destination}
+                                        onFocus={() => setActiveLocationField('destination')}
                                         onChange={event => {
                                             setDestination(event.target.value)
+                                            setDestinationCoordinates(null)
                                             setRouteInfo(null)
+                                            setActiveLocationField('destination')
                                         }}
                                         placeholder="Where are you heading?"
                                         className="w-full rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-500/10"
                                     />
+
+
+                                    {activeLocationField === 'destination' &&
+                                        destinationSuggestions.length > 0 && (
+                                            <div className="absolute left-0 right-0 top-full z-50 mt-2 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
+                                                {destinationSuggestions.map((suggestion, index) => (
+                                                    <button
+                                                        key={`${suggestion.label}-${index}`}
+                                                        type="button"
+                                                        onMouseDown={event => event.preventDefault()}
+                                                        onClick={() =>
+                                                            handleSelectLocation('destination', suggestion)
+                                                        }
+                                                        className="flex w-full items-start gap-3 rounded-lg px-3 py-3 text-left transition hover:bg-blue-50"
+                                                    >
+                                                        <span className="mt-0.5 text-indigo-600">◆</span>
+                                                        <span className="text-sm text-slate-700">
+                                                            {suggestion.label}
+                                                        </span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+
                                 </div>
                             </div>
+
 
                             <LocationPicker
                                 pickup={pickup}
                                 destination={destination}
+                                pickupCoordinates={pickupCoordinates}
+                                destinationCoordinates={destinationCoordinates}
+                                onPickupChange={setPickup}
+                                onDestinationChange={setDestination}
                                 onCoordinatesChange={({ pickup, destination }) => {
                                     setPickupCoordinates(pickup)
                                     setDestinationCoordinates(destination)
                                 }}
                                 onRouteInfoChange={setRouteInfo}
                             />
+
                         </div>
                     </div>
 
@@ -511,7 +1266,7 @@ function UserDashboard() {
                             </button>
                         </div>
                     )}
-                    
+
                 </section>
             </main>
 
@@ -523,6 +1278,70 @@ function UserDashboard() {
                 <ProfileEditor
                     onClose={() => setIsProfileEditorOpen(false)}
                 />
+            )}
+
+            {isClearNotificationsModalOpen && (
+                <div className="fixed inset-0 z-[1100] flex items-center justify-center bg-slate-900/40 px-5 backdrop-blur-sm">
+                    <div 
+                        role="alertdialog"
+                        aria-modal="true"
+                        aria-labelledby="clear-notifications-title"
+                        aria-describedby="clear-notifications-description"
+                        className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl sm:p-8"
+                    >
+                        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-red-50 text-red-600">
+                            <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="1.8"
+                                className="h-6 w-6"
+                            >
+                                <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m4 4v6m6-6v6"
+                                />
+                            </svg>
+                        </div>
+
+                        <h2
+                            id="clear-notifications-title"
+                            className="mt-5 text-xl font-bold text-slate-900"
+                        >
+                            Clear all notifications?
+                        </h2>
+
+                        <p
+                            id="clear-notifications-description"
+                            className="mt-3 text-sm leading-6 text-slate-500"
+                        >
+                            This will permanently delete all your notifications. This action cannot be undone.
+                        </p>
+
+                        <div className="mt-7 flex justify-end gap-3">
+                            <button
+                                type="button"
+                                onClick={() => setIsClearNotificationsModalOpen(false)}
+                                className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+                            >
+                                Cancel
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={async () => {
+                                    setIsClearNotificationsModalOpen(false)
+                                    await clearAllNotifications()
+                                }}
+                                className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-700"
+                            >
+                                Delete all
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
         </div>
     )

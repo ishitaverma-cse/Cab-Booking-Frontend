@@ -1,5 +1,5 @@
-
 import { useState } from 'react'
+import { useAuth } from '@clerk/clerk-react'
 
 const API_URL = (
     import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
@@ -58,6 +58,8 @@ export default function RideOptions({
     clerkId,
     onRideBooked,
 }) {
+    const { getToken } = useAuth()
+
     const [selectedVehicle, setSelectedVehicle] = useState('bike')
     const [booking, setBooking] = useState(false)
     const [error, setError] = useState('')
@@ -84,11 +86,19 @@ export default function RideOptions({
         setError('')
 
         try {
+            const token = await getToken()
+
+            if (!token) {
+                throw new Error('Your session has expired. Please sign in again.')
+            }
+
             const response = await fetch(`${API_URL}/rides`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                },
                 body: JSON.stringify({
-                    clerk_id: clerkId,
                     pickup_location: pickup.trim(),
                     drop_location: destination.trim(),
                     ride_type: vehicle.id,
@@ -161,11 +171,10 @@ export default function RideOptions({
                                         setError('')
                                     }}
                                     aria-pressed={selected}
-                                    className={`flex w-full items-center gap-3 rounded-2xl border p-3 text-left transition ${
-                                        selected
-                                            ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-500/10'
-                                            : 'border-slate-200 hover:border-blue-200 hover:bg-slate-50'
-                                    }`}
+                                    className={`flex w-full items-center gap-3 rounded-2xl border p-3 text-left transition ${selected
+                                        ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-500/10'
+                                        : 'border-slate-200 hover:border-blue-200 hover:bg-slate-50'
+                                        }`}
                                 >
                                     <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white text-2xl shadow-sm">
                                         {item.icon}
@@ -190,9 +199,8 @@ export default function RideOptions({
                                         <span className="block text-lg font-bold text-slate-900">
                                             ₹{estimateFare(item, routeInfo.distanceKm)}
                                         </span>
-                                        <span className={`block text-xs font-semibold ${
-                                            selected ? 'text-blue-700' : 'text-slate-400'
-                                        }`}>
+                                        <span className={`block text-xs font-semibold ${selected ? 'text-blue-700' : 'text-slate-400'
+                                            }`}>
                                             {selected ? 'Selected ✓' : 'Select'}
                                         </span>
                                     </span>
@@ -220,10 +228,9 @@ export default function RideOptions({
                     >
                         {booking
                             ? 'Requesting your ride...'
-                            : `Book ${vehicle?.name || 'Ride'} · ₹${
-                                vehicle
-                                    ? estimateFare(vehicle, routeInfo.distanceKm)
-                                    : 0
+                            : `Book ${vehicle?.name || 'Ride'} · ₹${vehicle
+                                ? estimateFare(vehicle, routeInfo.distanceKm)
+                                : 0
                             }`}
                     </button>
 

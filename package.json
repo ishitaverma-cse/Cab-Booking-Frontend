@@ -12,6 +12,7 @@
   "dependencies": {
     "@clerk/clerk-react": "^5.61.10",
     "@clerk/themes": "^2.4.57",
+    "@supabase/supabase-js": "^2.117.3",
     "@tailwindcss/vite": "^4.3.3",
     "leaflet": "^1.9.4",
     "leaflet-routing-machine": "^3.2.12",

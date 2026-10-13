@@ -1,3 +1,4 @@
+
 import { useCallback, useEffect, useState } from 'react'
 import {
     MapContainer,
@@ -5,6 +6,7 @@ import {
     Marker,
     Popup,
     useMap,
+    useMapEvents,
 } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet-routing-machine'
@@ -24,49 +26,93 @@ const DefaultIcon = L.icon({
 
 L.Marker.prototype.options.icon = DefaultIcon
 
+// Search an address without restricting it to Mohali.
 async function geocodeAddress(address) {
-    const queries = [
-        `${address}, Mohali, Punjab, India`,
-        `${address}, Sahibzada Ajit Singh Nagar, Punjab, India`,
-        `${address.split(',')[0]}, Mohali, Punjab, India`,
-    ]
+    const url = new URL(
+        'https://nominatim.openstreetmap.org/search'
+    )
 
-    for (const query of [...new Set(queries)]) {
+    url.search = new URLSearchParams({
+        q: address,
+        format: 'jsonv2',
+        limit: '5',
+        countrycodes: 'in',
+    }).toString()
+
+    const response = await fetch(url)
+
+    if (!response.ok) {
+        throw new Error(
+            'Address search is temporarily unavailable. Please select the location on the map.'
+        )
+    }
+
+    const results = await response.json()
+
+    if (!results.length) {
+        throw new Error(
+            'Address not found. Select the pickup or destination directly on the map.'
+        )
+    }
+
+    // Use the first search result; the user can correct it with the map.
+    return {
+        point: L.latLng(
+            Number(results[0].lat),
+            Number(results[0].lon)
+        ),
+        label: results[0].display_name,
+    }
+}
+
+// Resolve a map point to a readable address when possible.
+async function reverseGeocode(point) {
+    try {
         const url = new URL(
-            'https://nominatim.openstreetmap.org/search'
+            'https://nominatim.openstreetmap.org/reverse'
         )
 
         url.search = new URLSearchParams({
-            q: query,
+            lat: String(point.lat),
+            lon: String(point.lng),
             format: 'jsonv2',
-            limit: '1',
-            countrycodes: 'in',
+            zoom: '18',
+            addressdetails: '1',
         }).toString()
 
         const response = await fetch(url)
 
-        if (!response.ok) {
-            throw new Error(
-                'Address search is temporarily unavailable. Please try again.'
-            )
-        }
+        if (!response.ok) return null
 
-        const results = await response.json()
-
-        if (results.length > 0) {
-            return L.latLng(
-                Number(results[0].lat),
-                Number(results[0].lon)
-            )
-        }
-
-        // Respect the public geocoding service's usage policy.
-        await new Promise(resolve => setTimeout(resolve, 1100))
+        const result = await response.json()
+        return result.display_name || null
+    } catch {
+        return null
     }
+}
 
-    throw new Error(
-        `Could not find "${address}". Try a nearby landmark or a shorter address in Mohali, Punjab.`
-    )
+function MapClickHandler({ enabled, onLocationSelected }) {
+    useMapEvents({
+        click(event) {
+            if (enabled) {
+                onLocationSelected(event.latlng)
+            }
+        },
+    })
+
+    return null
+}
+
+function MapFocus({ point }) {
+    const map = useMap()
+
+    useEffect(() => {
+        if (point) {
+            map.flyTo(point, 16, { duration: 0.8 })
+        }
+    }, [map, point])
+
+    return null
 }
 
 function RouteLayer({ routePoints, onRouteFound, onRouteError }) {
@@ -106,7 +152,7 @@ function RouteLayer({ routePoints, onRouteFound, onRouteError }) {
             const route = event.routes[0]
 
             if (!route) {
-                onRouteError('No route was found for these locations.')
+                onRouteError('No road route was found for these locations.')
                 return
             }
 
@@ -117,11 +163,11 @@ function RouteLayer({ routePoints, onRouteFound, onRouteError }) {
         })
 
         routingControl.on('routingerror', () => {
-            if (!active) return
-
-            onRouteError(
-                'Unable to calculate the route. Please try again.'
-            )
+            if (active) {
+                onRouteError(
+                    'Unable to calculate a road route. Try moving either pin.'
+                )
+            }
         })
 
         routingControl.addTo(map)
@@ -131,12 +177,9 @@ function RouteLayer({ routePoints, onRouteFound, onRouteError }) {
             routingControl.off()
 
             try {
-                if (map.hasLayer(routingControl)) {
-                    map.removeControl(routingControl)
-                }
-            } catch (error) {
-                // Avoid cleanup errors if Leaflet has already removed the control.
-                console.debug('Routing control cleanup:', error)
+                map.removeControl(routingControl)
+            } catch {
+                // The map may already have removed the control.
             }
         }
     }, [map, routePoints, onRouteFound, onRouteError])
@@ -147,11 +190,17 @@ function RouteLayer({ routePoints, onRouteFound, onRouteError }) {
 export default function LocationPicker({
     pickup,
     destination,
+    onPickupChange,
+    onDestinationChange,
     onCoordinatesChange,
     onRouteInfoChange,
 }) {
+    const [pickupPoint, setPickupPoint] = useState(null)
+    const [destinationPoint, setDestinationPoint] = useState(null)
     const [routePoints, setRoutePoints] = useState(null)
+    const [selectionMode, setSelectionMode] = useState('pickup')
     const [loading, setLoading] = useState(false)
+    const [pinLoading, setPinLoading] = useState(false)
     const [error, setError] = useState('')
     const [routeInfo, setRouteInfo] = useState(null)
 
@@ -167,17 +216,52 @@ export default function LocationPicker({
         setError(message)
     }, [onRouteInfoChange])
 
-    async function handleShowRoute() {
-        if (!pickup.trim() || !destination.trim()) {
-            setError('Please enter both pickup and destination addresses.')
-            return
+    function updateCoordinates(nextPickup, nextDestination) {
+        onCoordinatesChange?.({
+            pickup: nextPickup
+                ? {
+                    latitude: nextPickup.lat,
+                    longitude: nextPickup.lng,
+                }
+                : null,
+            destination: nextDestination
+                ? {
+                    latitude: nextDestination.lat,
+                    longitude: nextDestination.lng,
+                }
+                : null,
+        })
+    }
+
+    async function handleMapClick(point) {
+        setPinLoading(true)
+        setError('')
+        setRouteInfo(null)
+        onRouteInfoChange?.(null)
+        setRoutePoints(null)
+
+        const label = await reverseGeocode(point)
+        const readableAddress =
+            label ||
+            `Pinned location (${point.lat.toFixed(6)}, ${point.lng.toFixed(6)})`
+
+        if (selectionMode === 'pickup') {
+            setPickupPoint(point)
+            onPickupChange?.(readableAddress)
+            updateCoordinates(point, destinationPoint)
+            setSelectionMode('destination')
+        } else {
+            setDestinationPoint(point)
+            onDestinationChange?.(readableAddress)
+            updateCoordinates(pickupPoint, point)
         }
 
-        if (
-            pickup.trim().toLowerCase() ===
-            destination.trim().toLowerCase()
-        ) {
-            setError('Pickup and destination must be different.')
+        setPinLoading(false)
+    }
+
+    async function handleShowRoute() {
+        if (!pickup.trim() || !destination.trim()) {
+            setError('Enter both addresses or select both points on the map.')
             return
         }
 
@@ -188,30 +272,45 @@ export default function LocationPicker({
         setRoutePoints(null)
 
         try {
-            const pickupPoint = await geocodeAddress(pickup.trim())
+            let nextPickup = pickupPoint
+            let nextDestination = destinationPoint
 
-            // Space out requests to the public geocoding service.
-            await new Promise(resolve => setTimeout(resolve, 1100))
 
-            const destinationPoint = await geocodeAddress(
-                destination.trim()
-            )
+            if (!nextPickup || !nextDestination) {
+                const pickupResult = nextPickup
+                    ? null
+                    : await geocodeAddress(pickup.trim())
 
-            setRoutePoints([pickupPoint, destinationPoint])
+                nextPickup = nextPickup || pickupResult.point
 
-            onCoordinatesChange?.({
-                pickup: {
-                    latitude: pickupPoint.lat,
-                    longitude: pickupPoint.lng,
-                },
-                destination: {
-                    latitude: destinationPoint.lat,
-                    longitude: destinationPoint.lng,
-                },
-            })
+                if (!nextDestination) {
+                    await new Promise(resolve => setTimeout(resolve, 1100))
+
+                    const destinationResult = await geocodeAddress(
+                        destination.trim()
+                    )
+
+                    nextDestination = destinationResult.point
+                }
+
+                setPickupPoint(nextPickup)
+                setDestinationPoint(nextDestination)
+
+                updateCoordinates(nextPickup, nextDestination)
+            }
+
+
+            if (nextPickup.distanceTo(nextDestination) < 10) {
+                throw new Error(
+                    'Pickup and destination must be at different locations.'
+                )
+            }
+
+            setRoutePoints([nextPickup, nextDestination])
         } catch (err) {
             setError(
-                err.message || 'Could not locate the entered addresses.'
+                err.message ||
+                'Could not locate these addresses. Select both points on the map.'
             )
         } finally {
             setLoading(false)
@@ -225,26 +324,64 @@ export default function LocationPicker({
                     Your route
                 </h3>
                 <p className="mt-1 text-sm text-slate-500">
-                    Find your route and compare available ride options.
+                    Search addresses or select your pickup and destination on the map.
                 </p>
             </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+                <button
+                    type="button"
+                    onClick={() => setSelectionMode('pickup')}
+                    className={`rounded-xl border px-4 py-3 text-sm font-semibold ${selectionMode === 'pickup'
+                            ? 'border-blue-600 bg-blue-50 text-blue-700'
+                            : 'border-slate-200 bg-white text-slate-600'
+                        }`}
+                >
+                    1. Select pickup
+                </button>
+
+                <button
+                    type="button"
+                    onClick={() => setSelectionMode('destination')}
+                    className={`rounded-xl border px-4 py-3 text-sm font-semibold ${selectionMode === 'destination'
+                            ? 'border-blue-600 bg-blue-50 text-blue-700'
+                            : 'border-slate-200 bg-white text-slate-600'
+                        }`}
+                >
+                    2. Select destination
+                </button>
+            </div>
+
+            <p className="rounded-xl bg-blue-50 p-3 text-sm text-blue-800">
+                Map mode: {selectionMode === 'pickup' ? 'Pickup' : 'Destination'}.
+                Click the map to place the selected pin.
+            </p>
+
+            {pinLoading && (
+                <p className="text-sm text-slate-500">
+                    Looking up the selected map point...
+                </p>
+            )}
 
             <button
                 type="button"
                 onClick={handleShowRoute}
-                disabled={loading}
+                disabled={loading || pinLoading}
                 className="w-full rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
             >
                 {loading ? 'Locating addresses...' : 'Show route'}
             </button>
 
             {error && (
-                <p
+                <div
                     role="alert"
                     className="break-words rounded-xl border border-red-100 bg-red-50 p-3 text-sm text-red-700"
                 >
-                    {error}
-                </p>
+                    <p>{error}</p>
+                    <p className="mt-1">
+                        You can select the location directly on the map instead.
+                    </p>
+                </div>
             )}
 
             {routeInfo && (
@@ -270,17 +407,16 @@ export default function LocationPicker({
                     </div>
 
                     <p className="mt-3 text-xs leading-5 text-slate-500">
-                        Route estimates are based on the routing provider
-                        and do not include live traffic.
+                        Estimates depend on the routing provider and do not include live traffic.
                     </p>
                 </div>
             )}
 
             <MapContainer
-                center={[30.7046, 76.7179]}
-                zoom={12}
+                center={[31.326, 75.576]}
+                zoom={8}
                 style={{
-                    height: '350px',
+                    height: '380px',
                     width: '100%',
                     borderRadius: '16px',
                 }}
@@ -291,22 +427,37 @@ export default function LocationPicker({
                     url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 />
 
+                <MapClickHandler
+                    enabled={!loading && !pinLoading}
+                    onLocationSelected={handleMapClick}
+                />
+
+                <MapFocus
+                    point={
+                        selectionMode === 'pickup'
+                            ? pickupPoint
+                            : destinationPoint
+                    }
+                />
+
+                {pickupPoint && (
+                    <Marker position={pickupPoint}>
+                        <Popup>Selected pickup location</Popup>
+                    </Marker>
+                )}
+
+                {destinationPoint && (
+                    <Marker position={destinationPoint}>
+                        <Popup>Selected destination</Popup>
+                    </Marker>
+                )}
+
                 {routePoints && (
-                    <>
-                        <Marker position={routePoints[0]}>
-                            <Popup>Pickup location</Popup>
-                        </Marker>
-
-                        <Marker position={routePoints[1]}>
-                            <Popup>Destination</Popup>
-                        </Marker>
-
-                        <RouteLayer
-                            routePoints={routePoints}
-                            onRouteFound={handleRouteFound}
-                            onRouteError={handleRouteError}
-                        />
-                    </>
+                    <RouteLayer
+                        routePoints={routePoints}
+                        onRouteFound={handleRouteFound}
+                        onRouteError={handleRouteError}
+                    />
                 )}
             </MapContainer>
 
@@ -314,11 +465,9 @@ export default function LocationPicker({
                 <h4 className="font-semibold text-slate-800">
                     Other ways to travel
                 </h4>
-
                 <p className="mt-1 text-sm leading-6 text-slate-500">
-                    Walking and public transport directions are not yet
-                    integrated. The current routing provider supplies
-                    the road route used for vehicle estimates.
+                    Walking and public transport directions are not integrated.
+                    The current routing provider supplies road-route estimates.
                 </p>
             </div>
         </div>
