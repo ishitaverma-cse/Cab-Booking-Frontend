@@ -3,6 +3,7 @@ import { UserButton, useUser, useAuth } from '@clerk/clerk-react'
 import ProfileEditor from './ProfileEditor'
 import LocationPicker from '../components/LocationPicker'
 import RideOptions from '../components/RideOptions'
+import RazorpayCheckout from '../components/RazorpayCheckout'
 
 async function searchAddresses(query, signal) {
     const trimmedQuery = query.trim()
@@ -92,6 +93,8 @@ function UserDashboard() {
         startIndex,
         startIndex + RIDES_PER_PAGE
     )
+    const [paymentStatuses, setPaymentStatuses] = useState({})
+
     const [toast, setToast] = useState('')
     const [isClearNotificationsModalOpen, setIsClearNotificationsModalOpen] = useState(false)
 
@@ -300,6 +303,14 @@ function UserDashboard() {
         setToast('Ride requested successfully!')
     }
 
+    const handlePaymentSuccess = (rideId, payment) => {
+        setPaymentStatuses(previous => ({
+            ...previous,
+            [rideId]: payment.payment_status,
+        }))
+
+        setToast('Payment successful! Your ride payment is confirmed.')
+    }
 
     function handleSelectLocation(field, suggestion) {
         const coordinates = {
@@ -492,6 +503,58 @@ function UserDashboard() {
         }
 
         loadNotifications()
+
+        return () => {
+            cancelled = true
+        }
+    }, [user?.id, getToken])
+
+
+    useEffect(() => {
+        let cancelled = false
+
+        const fetchPaymentStatuses = async () => {
+            if (!user?.id) return
+
+            try {
+                const token = await getToken()
+
+                const response = await fetch(`${API_URL}/payments`, {
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                    },
+                })
+
+                const result = await response.json()
+
+                if (!response.ok || !result.success) {
+                    throw new Error(
+                        result.message || 'Unable to fetch payment statuses.'
+                    )
+                }
+
+                if (cancelled) return
+
+                const statuses = {}
+
+                for (const payment of result.data || []) {
+                    if (payment.payment_status === 'paid') {
+                        statuses[payment.ride_id] = 'paid'
+                    } else if (!statuses[payment.ride_id]) {
+                        statuses[payment.ride_id] =
+                            payment.payment_status || 'pending'
+                    }
+                }
+
+                setPaymentStatuses(statuses)
+            } catch (error) {
+                if (!cancelled) {
+                    console.error('Payment status fetch error:', error.message)
+                }
+            }
+        }
+
+        fetchPaymentStatuses()
 
         return () => {
             cancelled = true
@@ -1194,6 +1257,21 @@ function UserDashboard() {
                                                     ' '
                                                 )}
                                             </span>
+
+                                            {ride.status === 'completed' &&
+                                                (paymentStatuses[ride.id] === 'paid' ? (
+                                                    <span className="mt-2 inline-block rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700">
+                                                        ✓ Paid
+                                                    </span>
+                                                ) : (
+                                                    <div className="mt-3">
+                                                        <RazorpayCheckout
+                                                            ride={ride}
+                                                            onPaymentSuccess={handlePaymentSuccess}
+                                                            onPaymentError={message => window.alert(message)}
+                                                        />
+                                                    </div>
+                                                ))}
                                         </div>
                                     </div>
 
@@ -1282,7 +1360,7 @@ function UserDashboard() {
 
             {isClearNotificationsModalOpen && (
                 <div className="fixed inset-0 z-[1100] flex items-center justify-center bg-slate-900/40 px-5 backdrop-blur-sm">
-                    <div 
+                    <div
                         role="alertdialog"
                         aria-modal="true"
                         aria-labelledby="clear-notifications-title"
