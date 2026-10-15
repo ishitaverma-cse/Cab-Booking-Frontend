@@ -94,6 +94,7 @@ function UserDashboard() {
         startIndex + RIDES_PER_PAGE
     )
     const [paymentStatuses, setPaymentStatuses] = useState({})
+    const [sendingReceiptId, setSendingReceiptId] = useState(null)
 
     const [toast, setToast] = useState('')
     const [isClearNotificationsModalOpen, setIsClearNotificationsModalOpen] = useState(false)
@@ -310,6 +311,40 @@ function UserDashboard() {
         }))
 
         setToast('Payment successful! Your ride payment is confirmed.')
+    }
+
+
+    async function handleEmailReceipt(rideId) {
+        setSendingReceiptId(rideId)
+
+        try {
+            const token = await getToken()
+
+            const response = await fetch(
+                `${API_URL}/rides/${encodeURIComponent(rideId)}/receipt`,
+                {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                    },
+                }
+            )
+
+            const result = await response.json()
+
+            if (!response.ok || !result.success) {
+                throw new Error(
+                    result.message || 'Unable to email your ride receipt.'
+                )
+            }
+
+            setToast('Ride receipt emailed successfully!')
+        } catch (error) {
+            console.error('Email receipt error:', error)
+            setToast(error.message || 'Unable to email your ride receipt.')
+        } finally {
+            setSendingReceiptId(null)
+        }
     }
 
     function handleSelectLocation(field, suggestion) {
@@ -1272,6 +1307,21 @@ function UserDashboard() {
                                                         />
                                                     </div>
                                                 ))}
+
+
+                                            {ride.status === 'completed' && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleEmailReceipt(ride.id)}
+                                                    disabled={sendingReceiptId === ride.id}
+                                                    className="mt-3 block w-full rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                                >
+                                                    {sendingReceiptId === ride.id
+                                                        ? 'Sending receipt...'
+                                                        : '✉ Email Receipt'}
+                                                </button>
+                                            )}
+
                                         </div>
                                     </div>
 
