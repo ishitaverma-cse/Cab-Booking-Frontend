@@ -96,6 +96,12 @@ function UserDashboard() {
     const [paymentStatuses, setPaymentStatuses] = useState({})
     const [sendingReceiptId, setSendingReceiptId] = useState(null)
 
+    const [reviewedRideIds, setReviewedRideIds] = useState([])
+    const [reviewingRideId, setReviewingRideId] = useState(null)
+    const [reviewRatings, setReviewRatings] = useState({})
+    const [reviewTexts, setReviewTexts] = useState({})
+    const [submittingReviewId, setSubmittingReviewId] = useState(null)
+
     const [toast, setToast] = useState('')
     const [isClearNotificationsModalOpen, setIsClearNotificationsModalOpen] = useState(false)
 
@@ -346,6 +352,52 @@ function UserDashboard() {
             setSendingReceiptId(null)
         }
     }
+
+
+    const handleSubmitReview = async (rideId) => {
+        const rating = reviewRatings[rideId]
+
+        if (!rating) {
+            setToast('Please select a star rating first.')
+            return
+        }
+
+        try {
+            setSubmittingReviewId(rideId)
+
+            const token = await getToken()
+
+            const response = await fetch(
+                `${API_URL}/rides/${encodeURIComponent(rideId)}/review`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${token}`,
+                    },
+                    body: JSON.stringify({
+                        rating,
+                        review_text: reviewTexts[rideId] || '',
+                    }),
+                }
+            )
+
+            const result = await response.json()
+
+            if (!response.ok || !result.success) {
+                throw new Error(result.message || 'Unable to submit review.')
+            }
+
+            setReviewedRideIds((previous) => [...previous, rideId])
+            setToast('Thank you! Your review has been submitted.')
+        } catch (error) {
+            console.error('Submit review error:', error)
+            setToast(error.message || 'Unable to submit your review.')
+        } finally {
+            setSubmittingReviewId(null)
+        }
+    }
+
 
     function handleSelectLocation(field, suggestion) {
         const coordinates = {
@@ -725,6 +777,66 @@ function UserDashboard() {
             setToast('Could not clear notifications. Please try again.')
         }
     }
+
+
+    useEffect(() => {
+        let cancelled = false
+
+        const fetchMyReviews = async () => {
+            try {
+                const token = await getToken()
+
+                const response = await fetch(`${API_URL}/rides/reviews/mine`, {
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                    },
+                })
+
+                const result = await response.json()
+
+                if (!response.ok || !result.success) {
+                    throw new Error(result.message || 'Failed to fetch reviews.')
+                }
+
+                if (!cancelled) {
+                    setReviewedRideIds(
+                        (result.data || []).map((review) => review.ride_id)
+                    )
+
+                    setReviewRatings(
+                        Object.fromEntries(
+                            (result.data || []).map((review) => [
+                                review.ride_id,
+                                review.rating,
+                            ])
+                        )
+                    )
+
+                    setReviewTexts(
+                        Object.fromEntries(
+                            (result.data || []).map((review) => [
+                                review.ride_id,
+                                review.review_text || '',
+                            ])
+                        )
+                    )
+                }
+            } catch (error) {
+                if (!cancelled) {
+                    console.error('Fetch reviews error:', error)
+                }
+            }
+        }
+
+        if (user && getToken) {
+            fetchMyReviews()
+        }
+
+        return () => {
+            cancelled = true
+        }
+    }, [user, getToken, API_URL])
+
 
 
     return (
@@ -1256,11 +1368,12 @@ function UserDashboard() {
                             {paginatedRides.map(ride => (
                                 <article
                                     key={ride.id}
-                                    className="rounded-2xl border border-slate-200 p-4 transition hover:border-blue-200 sm:p-5"
+                                    className="overflow-hidden rounded-2xl border border-slate-200 bg-white transition duration-200 hover:border-blue-200 hover:shadow-md"
                                 >
-                                    <div className="flex flex-wrap items-start justify-between gap-3">
-                                        <div className="flex items-center gap-3">
-                                            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-50 text-xl">
+                                    {/* Ride header */}
+                                    <div className="flex flex-wrap items-center justify-between gap-4 p-4 sm:p-5">
+                                        <div className="flex min-w-0 items-center gap-3">
+                                            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-2xl">
                                                 {ride.ride_type === 'bike'
                                                     ? '🏍️'
                                                     : ride.ride_type === 'auto'
@@ -1268,96 +1381,265 @@ function UserDashboard() {
                                                         : '🚕'}
                                             </div>
 
-                                            <div>
+                                            <div className="min-w-0">
                                                 <h3 className="font-bold capitalize text-slate-900">
-                                                    {ride.ride_type || 'Ride'}
+                                                    {ride.ride_type || 'Ride'} ride
                                                 </h3>
                                                 <p className="mt-1 text-xs text-slate-500">
                                                     {ride.created_at
-                                                        ? new Date(
-                                                            ride.created_at
-                                                        ).toLocaleString()
+                                                        ? new Date(ride.created_at).toLocaleString()
                                                         : 'Booking date unavailable'}
+                                                </p>
+                                                <p className="mt-1 break-all text-xs text-slate-400">
+                                                    ID: {ride.id.slice(0, 8)}
                                                 </p>
                                             </div>
                                         </div>
 
-                                        <div className="text-right">
-                                            <p className="text-lg font-bold text-slate-900">
+                                        <div className="sm:text-right">
+                                            <p className="text-xs font-medium text-slate-500">
+                                                Total fare
+                                            </p>
+                                            <p className="mt-0.5 text-2xl font-bold tracking-tight text-slate-900">
                                                 ₹{Number(ride.fare || 0).toFixed(0)}
                                             </p>
-                                            <span className="mt-1 inline-block rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold capitalize text-amber-700">
-                                                {(ride.status || 'requested').replaceAll(
-                                                    '_',
-                                                    ' '
-                                                )}
-                                            </span>
 
-                                            {ride.status === 'completed' &&
-                                                (paymentStatuses[ride.id] === 'paid' ? (
-                                                    <span className="mt-2 inline-block rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700">
-                                                        ✓ Paid
+                                            <span
+                                                className={`mt-2 inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold capitalize ${ride.status === 'completed'
+                                                        ? 'bg-emerald-50 text-emerald-700'
+                                                        : 'bg-amber-50 text-amber-700'
+                                                    }`}
+                                            >
+                                                {ride.status === 'completed' && '✓ '}
+                                                {(ride.status || 'requested').replaceAll('_', ' ')}
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    {/* Payment and receipt actions */}
+                                    {ride.status === 'completed' && (
+                                        <div className="flex flex-wrap items-center justify-between gap-3 border-y border-slate-100 bg-slate-50/70 px-4 py-3 sm:px-5">
+                                            <div>
+                                                {paymentStatuses[ride.id] === 'paid' ? (
+                                                    <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700">
+                                                        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-xs">
+                                                            ✓
+                                                        </span>
+                                                        Payment completed
                                                     </span>
                                                 ) : (
-                                                    <div className="mt-3">
-                                                        <RazorpayCheckout
-                                                            ride={ride}
-                                                            onPaymentSuccess={handlePaymentSuccess}
-                                                            onPaymentError={message => window.alert(message)}
-                                                        />
+                                                    <div className="text-sm font-medium text-slate-600">
+                                                        Payment pending
                                                     </div>
-                                                ))}
+                                                )}
+                                            </div>
 
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                {paymentStatuses[ride.id] !== 'paid' && (
+                                                    <RazorpayCheckout
+                                                        ride={ride}
+                                                        onPaymentSuccess={handlePaymentSuccess}
+                                                        onPaymentError={message => window.alert(message)}
+                                                    />
+                                                )}
 
-                                            {ride.status === 'completed' && (
                                                 <button
                                                     type="button"
                                                     onClick={() => handleEmailReceipt(ride.id)}
                                                     disabled={sendingReceiptId === ride.id}
-                                                    className="mt-3 block w-full rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-white px-3.5 py-2 text-sm font-semibold text-blue-700 transition hover:border-blue-300 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
                                                 >
+                                                    <span aria-hidden="true">✉</span>
                                                     {sendingReceiptId === ride.id
-                                                        ? 'Sending receipt...'
-                                                        : '✉ Email Receipt'}
+                                                        ? 'Sending...'
+                                                        : 'Email receipt'}
                                                 </button>
-                                            )}
-
+                                            </div>
                                         </div>
-                                    </div>
+                                    )}
 
-                                    <div className="mt-5 space-y-3 border-t border-slate-100 pt-4">
-                                        <div className="flex gap-3">
-                                            <span className="mt-1 text-sm text-blue-600">
-                                                ●
-                                            </span>
-                                            <div className="min-w-0">
-                                                <p className="text-xs text-slate-400">
-                                                    PICKUP
-                                                </p>
-                                                <p className="break-words text-sm font-medium text-slate-700">
-                                                    {ride.pickup_location}
-                                                </p>
+                                    {/* Journey route */}
+                                    <div className="p-4 sm:p-5">
+                                        <div className="rounded-2xl border border-slate-100 bg-slate-50/70 p-4 sm:p-5">
+                                            <div className="flex gap-3">
+                                                <div className="flex w-5 shrink-0 flex-col items-center">
+                                                    <span className="mt-1.5 h-3 w-3 rounded-full border-[3px] border-blue-600 bg-white" />
+                                                    <span className="my-1.5 min-h-8 w-px flex-1 border-l-2 border-dashed border-slate-300" />
+                                                </div>
+
+                                                <div className="min-w-0 flex-1 pb-4">
+                                                    <p className="text-[10px] font-bold tracking-[0.16em] text-slate-400">
+                                                        PICKUP
+                                                    </p>
+                                                    <p className="mt-1.5 break-words text-sm font-semibold leading-6 text-slate-800">
+                                                        {ride.pickup_location || 'Pickup unavailable'}
+                                                    </p>
+                                                </div>
+                                            </div>
+
+                                            <div className="flex gap-3">
+                                                <div className="flex w-5 shrink-0 justify-center">
+                                                    <span className="mt-1 h-3 w-3 rounded-sm bg-emerald-500 ring-4 ring-emerald-50" />
+                                                </div>
+
+                                                <div className="min-w-0 flex-1">
+                                                    <p className="text-[10px] font-bold tracking-[0.16em] text-slate-400">
+                                                        DESTINATION
+                                                    </p>
+                                                    <p className="mt-1.5 break-words text-sm font-semibold leading-6 text-slate-800">
+                                                        {ride.drop_location || 'Destination unavailable'}
+                                                    </p>
+                                                </div>
                                             </div>
                                         </div>
 
-                                        <div className="flex gap-3">
-                                            <span className="mt-1 text-sm text-indigo-600">
-                                                ◆
-                                            </span>
-                                            <div className="min-w-0">
-                                                <p className="text-xs text-slate-400">
-                                                    DESTINATION
-                                                </p>
-                                                <p className="break-words text-sm font-medium text-slate-700">
-                                                    {ride.drop_location}
-                                                </p>
+                                        {/* Rating and review */}
+                                        {ride.status === 'completed' && (
+                                            <div className="mt-4 rounded-2xl border border-slate-200 p-4 sm:p-5">
+                                                {reviewedRideIds.includes(ride.id) ? (
+                                                    <div>
+                                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                                            <div className="flex items-center gap-2">
+                                                                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-50">
+                                                                    <span className="text-lg text-amber-500">
+                                                                        ★
+                                                                    </span>
+                                                                </div>
+                                                                <div>
+                                                                    <h4 className="text-sm font-bold text-slate-900">
+                                                                        Your feedback
+                                                                    </h4>
+                                                                    <p className="mt-0.5 text-xs text-slate-500">
+                                                                        Thanks for riding with RideFlow
+                                                                    </p>
+                                                                </div>
+                                                            </div>
+
+                                                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
+                                                                ✓ Submitted
+                                                            </span>
+                                                        </div>
+
+                                                        <div className="mt-4 flex flex-wrap items-center gap-3">
+                                                            <span className="text-lg tracking-wider text-amber-400">
+                                                                {'★'.repeat(reviewRatings[ride.id] || 0)}
+                                                                {'☆'.repeat(
+                                                                    5 - (reviewRatings[ride.id] || 0)
+                                                                )}
+                                                            </span>
+                                                            <span className="text-xs font-semibold text-slate-500">
+                                                                {reviewRatings[ride.id] || 0}/5
+                                                            </span>
+                                                        </div>
+
+                                                        {reviewTexts[ride.id] && (
+                                                            <p className="mt-2 text-sm leading-6 text-slate-600">
+                                                                “{reviewTexts[ride.id]}”
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                ) : (
+                                                    <div>
+                                                        <div className="flex items-start gap-3">
+                                                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50">
+                                                                <span className="text-xl text-blue-600">
+                                                                    ☆
+                                                                </span>
+                                                            </div>
+                                                            <div>
+                                                                <h4 className="text-sm font-bold text-slate-900">
+                                                                    How was your ride?
+                                                                </h4>
+                                                                <p className="mt-1 text-xs leading-5 text-slate-500">
+                                                                    Rate your experience and share feedback
+                                                                    with RideFlow.
+                                                                </p>
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="mt-4 flex flex-wrap items-center gap-1">
+                                                            {[1, 2, 3, 4, 5].map(star => (
+                                                                <button
+                                                                    key={star}
+                                                                    type="button"
+                                                                    aria-label={`Rate ${star} out of 5 stars`}
+                                                                    aria-pressed={
+                                                                        reviewRatings[ride.id] === star
+                                                                    }
+                                                                    onClick={() =>
+                                                                        setReviewRatings(previous => ({
+                                                                            ...previous,
+                                                                            [ride.id]: star,
+                                                                        }))
+                                                                    }
+                                                                    className={`flex h-10 w-10 items-center justify-center rounded-xl text-2xl transition hover:scale-105 ${star <= (reviewRatings[ride.id] || 0)
+                                                                            ? 'bg-amber-50 text-amber-400'
+                                                                            : 'text-slate-300 hover:bg-slate-50 hover:text-amber-300'
+                                                                        }`}
+                                                                >
+                                                                    ★
+                                                                </button>
+                                                            ))}
+
+                                                            <span className="ml-2 text-xs font-medium text-slate-500">
+                                                                {reviewRatings[ride.id]
+                                                                    ? `${reviewRatings[ride.id]} out of 5`
+                                                                    : 'Tap to rate'}
+                                                            </span>
+                                                        </div>
+
+                                                        <textarea
+                                                            value={reviewTexts[ride.id] || ''}
+                                                            onChange={event =>
+                                                                setReviewTexts(previous => ({
+                                                                    ...previous,
+                                                                    [ride.id]: event.target.value.slice(0, 1000),
+                                                                }))
+                                                            }
+                                                            maxLength={1000}
+                                                            rows={2}
+                                                            placeholder="Add a comment (optional)"
+                                                            className="mt-3 w-full resize-y rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-3 text-sm leading-6 text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-50"
+                                                        />
+
+                                                        <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                                                            <p className="text-xs text-slate-400">
+                                                                {(reviewTexts[ride.id] || '').length}/1000
+                                                                characters
+                                                            </p>
+
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleSubmitReview(ride.id)}
+                                                                disabled={
+                                                                    !reviewRatings[ride.id] ||
+                                                                    submittingReviewId === ride.id
+                                                                }
+                                                                className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 hover:shadow disabled:cursor-not-allowed disabled:opacity-50"
+                                                            >
+                                                                {submittingReviewId === ride.id
+                                                                    ? 'Submitting...'
+                                                                    : 'Submit review'}
+                                                                {submittingReviewId !== ride.id && (
+                                                                    <span aria-hidden="true">→</span>
+                                                                )}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                )}
                                             </div>
+                                        )}
+
+                                        {/* Full booking reference */}
+                                        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3">
+                                            <span className="text-xs text-slate-400">
+                                                Booking reference
+                                            </span>
+                                            <span className="break-all font-mono text-xs font-medium text-slate-500">
+                                                {ride.id}
+                                            </span>
                                         </div>
                                     </div>
-
-                                    <p className="mt-4 break-all text-xs text-slate-400">
-                                        Booking ID: {ride.id}
-                                    </p>
                                 </article>
                             ))}
                         </div>
