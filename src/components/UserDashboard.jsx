@@ -5,6 +5,7 @@ import LocationPicker from '../components/LocationPicker'
 import RideOptions from '../components/RideOptions'
 import RazorpayCheckout from '../components/RazorpayCheckout'
 
+
 async function searchAddresses(query, signal) {
     const trimmedQuery = query.trim()
 
@@ -14,8 +15,14 @@ async function searchAddresses(query, signal) {
 
     url.search = new URLSearchParams({
         q: trimmedQuery,
-        limit: '5',
+        limit: '10',
         lang: 'en',
+
+        // Bias results toward the Mohali / Chandigarh area.
+        lat: '30.7046',
+        lon: '76.7179',
+        zoom: '12',
+        location_bias_scale: '1',
     }).toString()
 
     const response = await fetch(url.toString(), { signal })
@@ -26,36 +33,91 @@ async function searchAddresses(query, signal) {
 
     const result = await response.json()
 
-    return (result.features || [])
+    const normalizedQuery = trimmedQuery.toLowerCase()
+
+    const queryWords = normalizedQuery
+        .replace(/[.,]/g, ' ')
+        .split(/\s+/)
+        .filter(word => word.length > 1)
+
+    const addresses = (result.features || [])
         .map(feature => {
             const properties = feature.properties || {}
-            const [longitude, latitude] = feature.geometry.coordinates
+            const coordinates = feature.geometry?.coordinates
+
+            if (
+                !Array.isArray(coordinates) ||
+                coordinates.length < 2
+            ) {
+                return null
+            }
+
+            const [longitude, latitude] = coordinates
+
+            if (
+                !Number.isFinite(latitude) ||
+                !Number.isFinite(longitude)
+            ) {
+                return null
+            }
 
             const street = [
                 properties.housenumber,
                 properties.street,
-            ].filter(Boolean).join(' ')
+            ]
+                .filter(Boolean)
+                .join(' ')
 
             const label = [
                 properties.name,
                 street,
+                properties.locality,
                 properties.suburb,
-                properties.city || properties.town || properties.village,
-                properties.district,
+                properties.city ||
+                properties.town ||
+                properties.village,
+                properties.postcode,
                 properties.state,
-                properties.country,
             ]
                 .filter(Boolean)
-                .filter((value, index, values) => values.indexOf(value) === index)
+                .filter(
+                    (value, index, values) => values.indexOf(value) === index
+                )
                 .join(', ')
+
+            const searchableText = [
+                label,
+                properties.postcode,
+                properties.county,
+            ]
+                .filter(Boolean)
+                .join(' ')
+                .toLowerCase()
+
+            const matchedWords = queryWords.filter(word =>
+                searchableText.includes(word)
+            ).length
+
+            const score =
+                queryWords.length > 0
+                    ? matchedWords / queryWords.length
+                    : 0
 
             return {
                 label,
                 latitude,
                 longitude,
+                score,
             }
         })
-        .filter(address => address.label)
+        .filter(address => address?.label)
+        .sort((a, b) => b.score - a.score)
+
+    return addresses.map(({ label, latitude, longitude }) => ({
+        label,
+        latitude,
+        longitude,
+    }))
 }
 
 function UserDashboard() {
@@ -83,7 +145,7 @@ function UserDashboard() {
     const [ridesLoading, setRidesLoading] = useState(true)
     const [ridesError, setRidesError] = useState('')
     const [currentRidePage, setCurrentRidePage] = useState(1)
-    const RIDES_PER_PAGE = 3
+    const RIDES_PER_PAGE = 4
 
     const totalRidePages = Math.ceil(rides.length / RIDES_PER_PAGE)
 
@@ -101,6 +163,7 @@ function UserDashboard() {
     const [reviewRatings, setReviewRatings] = useState({})
     const [reviewTexts, setReviewTexts] = useState({})
     const [submittingReviewId, setSubmittingReviewId] = useState(null)
+    const [activeReviewRideId, setActiveReviewRideId] = useState(null)
 
     const [toast, setToast] = useState('')
     const [isClearNotificationsModalOpen, setIsClearNotificationsModalOpen] = useState(false)
@@ -863,19 +926,40 @@ function UserDashboard() {
 
 
             {/* Navbar */}
-            <header className="sticky top-0 z-10 border-b border-blue-100 bg-white/90 backdrop-blur-xl">
+            <header className="sticky top-0 z-[1000] border-b border-blue-100 bg-white/90 backdrop-blur-xl">
                 <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4 sm:px-8">
                     <a
-                        href="/"
+                        href="#home"
+                        onClick={() => setIsNotificationOpen(false)}
                         className="text-xl font-extrabold tracking-tight text-slate-900"
                     >
                         RideFlow<span className="text-blue-600">.</span>
                     </a>
 
                     <div className="flex items-center gap-4">
-                        <span className="hidden text-sm text-slate-500 sm:block">
-                            Welcome back, {firstName}
-                        </span>
+
+                        {/* Dashboard Navigation */}
+                        <nav
+                            aria-label="Dashboard navigation"
+                            className="hidden items-center gap-1 md:flex"
+                        >
+                            <a
+                                href="#plan-route"
+                                onClick={() => setIsNotificationOpen(false)}
+                                className="rounded-xl px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-blue-50 hover:text-blue-700"
+                            >
+                                Book Ride
+                            </a>
+
+                            <a
+                                href="#my-rides"
+                                onClick={() => setIsNotificationOpen(false)}
+                                className="rounded-xl px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-blue-50 hover:text-blue-700"
+                            >
+                                My Rides
+                            </a>
+                        </nav>
+
 
                         {/* Notifications */}
                         <div className="relative" ref={notificationPanelRef}>
@@ -1047,14 +1131,40 @@ function UserDashboard() {
                             )}
                         </div>
 
-                        <UserButton />
+                        <UserButton>
+                            <UserButton.UserProfilePage
+                                label="Edit profile"
+                                url="edit-profile"
+                                labelIcon={<span>✏️</span>}
+                            >
+                                <div className="p-4">
+                                    <p className="text-sm text-slate-600">
+                                        Manage your RideFlow profile from your dashboard.
+                                    </p>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsProfileEditorOpen(true)}
+                                        className="mt-3 w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
+                                    >
+                                        Open profile editor
+                                    </button>
+                                </div>
+                            </UserButton.UserProfilePage>
+                        </UserButton>
                     </div>
                 </div>
             </header>
 
+            {isProfileEditorOpen && (
+                <ProfileEditor
+                    onClose={() => setIsProfileEditorOpen(false)}
+                />
+            )}
+
             <main className="mx-auto max-w-7xl px-5 py-8 sm:px-8 sm:py-12">
                 {/* Welcome */}
-                <section className="mb-8">
+                <section id='home' className="mb-8">
                     <p className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-blue-400">
                         YOUR PERSONAL TRAVEL SPACE
                     </p>
@@ -1069,243 +1179,280 @@ function UserDashboard() {
                     </p>
                 </section>
 
+
                 {/* Hero Banner */}
-                <section className="relative isolate overflow-hidden rounded-3xl border border-blue-100 bg-gradient-to-br from-white via-[#edf4ff] to-[#e2edff] p-7 shadow-xl shadow-blue-900/[0.04] sm:p-10 lg:p-12">
+                <section className="relative isolate overflow-hidden rounded-3xl border border-blue-100 bg-gradient-to-br from-white via-[#edf4ff] to-[#e2edff] p-6 shadow-xl shadow-blue-900/[0.04] sm:p-9 lg:p-10">
+                    {/* Decorative background elements */}
                     <div className="pointer-events-none absolute -right-16 -top-24 -z-10 h-80 w-80 rounded-full border-[55px] border-blue-500/[0.06]" />
                     <div className="pointer-events-none absolute -bottom-28 right-24 -z-10 h-64 w-64 rounded-full bg-blue-300/20 blur-3xl" />
 
-                    <div className="relative max-w-2xl">
-                        <span className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-white/80 px-3 py-1.5 text-xs font-semibold tracking-wide text-blue-700">
-                            <span className="h-1.5 w-1.5 rounded-full bg-blue-600" />
-                            YOUR JOURNEY, YOUR WAY
-                        </span>
-
-                        <h2 className="mt-6 max-w-xl text-3xl font-bold leading-tight tracking-tight text-slate-900 sm:text-4xl lg:text-5xl">
-                            Every great journey starts with a{' '}
-                            <span className="text-blue-600">ride.</span>
-                        </h2>
-
-                        <p className="mt-5 max-w-lg text-sm leading-7 text-slate-600 sm:text-base">
-                            Get ready to travel comfortably. Your dashboard keeps your ride
-                            experience organized in one place.
-                        </p>
-
-                        <div className="mt-8 flex items-center gap-3 text-sm text-slate-600">
-                            <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-blue-100 bg-white text-lg text-blue-600">
-                                ↗
+                    <div className="relative grid items-center gap-8 lg:grid-cols-[1.15fr_0.85fr] lg:gap-6">
+                        {/* Left: Hero content */}
+                        <div className="relative z-10 max-w-2xl">
+                            <span className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-white/80 px-3 py-1.5 text-xs font-semibold tracking-wide text-blue-700">
+                                <span className="h-1.5 w-1.5 rounded-full bg-blue-600" />
+                                YOUR JOURNEY, YOUR WAY
                             </span>
-                            <span>Made for smoother journeys.</span>
+
+                            <h2 className="mt-5 max-w-xl text-3xl font-bold leading-tight tracking-tight text-slate-900 sm:text-4xl lg:text-[2.8rem]">
+                                Every great journey starts with a{' '}
+                                <span className="text-blue-600">ride.</span>
+                            </h2>
+
+                            <p className="mt-4 max-w-lg text-sm leading-7 text-slate-600 sm:text-base">
+                                Your next destination is closer than you think.
+                                Plan your ride and let the journey begin.
+                            </p>
+
+                            <div className="mt-6 inline-flex items-center gap-3 rounded-2xl border border-blue-100/80 bg-white/70 px-4 py-3 shadow-sm shadow-blue-900/[0.03]">
+                                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+                                    <svg
+                                        xmlns="http://www.w3.org/2000/svg"
+                                        width="21"
+                                        height="21"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="1.8"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                    >
+                                        <path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z" />
+                                        <circle cx="12" cy="10" r="2.5" />
+                                    </svg>
+                                </span>
+
+                                <div>
+                                    <p className="text-sm font-semibold text-slate-800">
+                                        Your city. Your route.
+                                    </p>
+                                    <p className="mt-0.5 text-xs text-slate-500">
+                                        Your ride, your way.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Right: Decorative journey illustration */}
+                        <div className="relative mx-auto flex w-full max-w-sm items-center justify-center lg:min-h-[290px] lg:max-w-none">
+                            <div className="absolute h-56 w-56 rounded-full bg-blue-300/20 blur-3xl sm:h-64 sm:w-64" />
+
+                            <div className="relative w-full max-w-[320px]">
+                                <svg
+                                    viewBox="0 0 340 290"
+                                    fill="none"
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    className="h-auto w-full drop-shadow-sm"
+                                    role="img"
+                                    aria-label="Illustration of a journey route connecting two destinations"
+                                >
+                                    {/* Soft illustration backdrop */}
+                                    <circle cx="170" cy="145" r="112" fill="#DBEAFE" fillOpacity="0.48" />
+                                    <circle cx="170" cy="145" r="86" stroke="#93C5FD" strokeOpacity="0.35" strokeDasharray="4 8" />
+
+                                    {/* Winding route */}
+                                    <path
+                                        d="M69 213C69 173 105 173 105 136C105 97 151 101 171 127C190 153 211 174 235 146C249 130 249 91 276 78"
+                                        stroke="#FFFFFF"
+                                        strokeWidth="19"
+                                        strokeLinecap="round"
+                                    />
+                                    <path
+                                        d="M69 213C69 173 105 173 105 136C105 97 151 101 171 127C190 153 211 174 235 146C249 130 249 91 276 78"
+                                        stroke="#60A5FA"
+                                        strokeWidth="3"
+                                        strokeLinecap="round"
+                                        strokeDasharray="5 8"
+                                    />
+
+                                    {/* Starting point */}
+                                    <circle cx="69" cy="213" r="19" fill="#BFDBFE" fillOpacity="0.65" />
+                                    <circle cx="69" cy="213" r="10" fill="#FFFFFF" />
+                                    <circle cx="69" cy="213" r="5" fill="#2563EB" />
+
+                                    {/* Destination marker */}
+                                    <path
+                                        d="M276 52C263 52 253 62 253 75C253 92 276 111 276 111S299 92 299 75C299 62 289 52 276 52Z"
+                                        fill="#2563EB"
+                                    />
+                                    <circle cx="276" cy="75" r="8" fill="#FFFFFF" />
+                                    <circle cx="276" cy="75" r="3" fill="#2563EB" />
+
+                                    {/* Floating travel card */}
+                                    <rect x="104" y="177" width="148" height="62" rx="15" fill="#FFFFFF" />
+                                    <rect x="104.5" y="177.5" width="147" height="61" rx="14.5" stroke="#DBEAFE" />
+
+                                    <rect x="116" y="189" width="36" height="36" rx="11" fill="#EFF6FF" />
+                                    <path
+                                        d="M125 207V202L127 196H141L143 202V207M125 202H143M128 207V210M140 207V210"
+                                        stroke="#2563EB"
+                                        strokeWidth="1.6"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                    />
+                                    <circle cx="129" cy="203" r="1.5" fill="#2563EB" />
+                                    <circle cx="139" cy="203" r="1.5" fill="#2563EB" />
+
+                                    <rect x="160" y="190" width="64" height="6" rx="3" fill="#CBD5E1" />
+                                    <rect x="160" y="202" width="47" height="5" rx="2.5" fill="#E2E8F0" />
+                                    <rect x="160" y="213" width="56" height="5" rx="2.5" fill="#DBEAFE" />
+
+                                    {/* Small decorative accent */}
+                                    <circle cx="91" cy="75" r="5" fill="#60A5FA" fillOpacity="0.8" />
+                                    <circle cx="230" cy="53" r="4" fill="#93C5FD" />
+                                    <path d="M83 99L88 104M88 99L83 104" stroke="#60A5FA" strokeWidth="2" strokeLinecap="round" />
+                                </svg>
+                            </div>
                         </div>
                     </div>
                 </section>
 
                 {/* Main Dashboard */}
-                <section className="mt-8 grid items-start gap-6 lg:grid-cols-[1.5fr_1fr]">
-                    {/* Left Column: Ride Planner and Map */}
-                    <div className="min-w-0 rounded-3xl border border-slate-200/80 bg-white p-6 shadow-lg shadow-slate-900/[0.03] sm:p-8">
-                        <div className="mb-7">
-                            <p className="text-xs font-semibold uppercase tracking-widest text-blue-600">
-                                PLAN A JOURNEY
-                            </p>
-                            <h2 className="mt-2 text-xl font-bold text-slate-900">
-                                Plan your next ride
-                            </h2>
-                            <p className="mt-2 text-sm text-slate-500">
-                                Enter your locations and view your route on the map.
-                            </p>
-                        </div>
+                <section id="plan-route" className="mt-8 scroll-mt-24">                    <LocationPicker
+                    pickup={pickup}
+                    destination={destination}
+                    pickupCoordinates={pickupCoordinates}
+                    destinationCoordinates={destinationCoordinates}
+                    onPickupChange={setPickup}
+                    onDestinationChange={setDestination}
+                    onCoordinatesChange={({ pickup, destination }) => {
+                        setPickupCoordinates(pickup)
+                        setDestinationCoordinates(destination)
+                    }}
+                    onRouteInfoChange={setRouteInfo}
+                    locationFields={
+                        <>
+                            <div className="mb-7">
+                                <p className="text-xs font-semibold uppercase tracking-widest text-blue-600">
+                                    PLAN A JOURNEY
+                                </p>
 
-                        <div className="space-y-5">
-                            <div className="flex gap-4">
-                                <div className="mt-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-blue-100 bg-blue-50 text-blue-600">
-                                    ●
-                                </div>
-
-                                <div className="relative flex-1">
-                                    <label
-                                        htmlFor="pickup"
-                                        className="mb-2 block text-sm font-medium text-slate-700"
-                                    >
-                                        Pickup location
-                                    </label>
-                                    <input
-                                        id="pickup"
-                                        type="text"
-                                        value={pickup}
-                                        onFocus={() => setActiveLocationField('pickup')}
-                                        onChange={event => {
-                                            setPickup(event.target.value)
-                                            setPickupCoordinates(null)
-                                            setRouteInfo(null)
-                                            setActiveLocationField('pickup')
-                                        }}
-                                        placeholder="Enter your pickup location"
-                                        className="w-full rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-500/10"
-                                    />
-
-
-                                    {activeLocationField === 'pickup' &&
-                                        pickupSuggestions.length > 0 && (
-                                            <div className="absolute left-0 right-0 top-full z-50 mt-2 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
-                                                {pickupSuggestions.map((suggestion, index) => (
-                                                    <button
-                                                        key={`${suggestion.label}-${index}`}
-                                                        type="button"
-                                                        onMouseDown={event => event.preventDefault()}
-                                                        onClick={() =>
-                                                            handleSelectLocation('pickup', suggestion)
-                                                        }
-                                                        className="flex w-full items-start gap-3 rounded-lg px-3 py-3 text-left transition hover:bg-blue-50"
-                                                    >
-                                                        <span className="mt-0.5 text-blue-600">●</span>
-                                                        <span className="text-sm text-slate-700">
-                                                            {suggestion.label}
-                                                        </span>
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        )}
-
-                                </div>
-                            </div>
-
-                            <div className="ml-5 h-5 border-l-2 border-dashed border-slate-300" />
-
-                            <div className="flex gap-4">
-                                <div className="mt-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-indigo-100 bg-indigo-50 text-indigo-600">
-                                    ◆
-                                </div>
-
-                                <div className="relative flex-1">
-                                    <label
-                                        htmlFor="destination"
-                                        className="mb-2 block text-sm font-medium text-slate-700"
-                                    >
-                                        Destination
-                                    </label>
-                                    <input
-                                        id="destination"
-                                        type="text"
-                                        value={destination}
-                                        onFocus={() => setActiveLocationField('destination')}
-                                        onChange={event => {
-                                            setDestination(event.target.value)
-                                            setDestinationCoordinates(null)
-                                            setRouteInfo(null)
-                                            setActiveLocationField('destination')
-                                        }}
-                                        placeholder="Where are you heading?"
-                                        className="w-full rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-500/10"
-                                    />
-
-
-                                    {activeLocationField === 'destination' &&
-                                        destinationSuggestions.length > 0 && (
-                                            <div className="absolute left-0 right-0 top-full z-50 mt-2 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
-                                                {destinationSuggestions.map((suggestion, index) => (
-                                                    <button
-                                                        key={`${suggestion.label}-${index}`}
-                                                        type="button"
-                                                        onMouseDown={event => event.preventDefault()}
-                                                        onClick={() =>
-                                                            handleSelectLocation('destination', suggestion)
-                                                        }
-                                                        className="flex w-full items-start gap-3 rounded-lg px-3 py-3 text-left transition hover:bg-blue-50"
-                                                    >
-                                                        <span className="mt-0.5 text-indigo-600">◆</span>
-                                                        <span className="text-sm text-slate-700">
-                                                            {suggestion.label}
-                                                        </span>
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        )}
-
-                                </div>
-                            </div>
-
-
-                            <LocationPicker
-                                pickup={pickup}
-                                destination={destination}
-                                pickupCoordinates={pickupCoordinates}
-                                destinationCoordinates={destinationCoordinates}
-                                onPickupChange={setPickup}
-                                onDestinationChange={setDestination}
-                                onCoordinatesChange={({ pickup, destination }) => {
-                                    setPickupCoordinates(pickup)
-                                    setDestinationCoordinates(destination)
-                                }}
-                                onRouteInfoChange={setRouteInfo}
-                            />
-
-                        </div>
-                    </div>
-
-                    {/* Right Column: Account + Ride Options */}
-                    <div className="min-w-0 space-y-6">
-                        {/* Account Card */}
-                        <div className="rounded-3xl border border-slate-200/80 bg-white p-6 shadow-lg shadow-slate-900/[0.03] sm:p-8">
-                            <div className="flex items-center justify-between gap-3">
-                                <h2 className="text-xl font-bold text-slate-900">
-                                    Your account
+                                <h2 className="mt-3 text-xl font-bold text-slate-900">
+                                    Plan your next ride
                                 </h2>
-                                <span className="rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
-                                    Signed in
-                                </span>
+
+                                <p className="mt-2 text-sm leading-6 text-slate-500">
+                                    Enter your locations and view your route on the map.
+                                </p>
                             </div>
 
-                            <div className="mt-7 flex items-center gap-4">
-                                <img
-                                    src={
-                                        user?.imageUrl ||
-                                        'https://placehold.co/96x96/eaf1ff/2563eb?text=User'
-                                    }
-                                    alt="Profile"
-                                    className="h-16 w-16 rounded-2xl border border-blue-100 object-cover"
-                                />
+                            <div className="space-y-5">
+                                {/* Pickup */}
+                                <div className="flex gap-4">
+                                    <div className="mt-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-blue-100 bg-blue-50 text-blue-600">
+                                        ●
+                                    </div>
 
-                                <div className="min-w-0">
-                                    <h3 className="truncate font-bold text-slate-900">
-                                        {user?.fullName || firstName}
-                                    </h3>
-                                    <p className="mt-1 truncate text-sm text-slate-500">
-                                        {user?.primaryEmailAddress?.emailAddress ||
-                                            'No email available'}
-                                    </p>
+                                    <div className="relative min-w-0 flex-1">
+                                        <label
+                                            htmlFor="pickup"
+                                            className="mb-2 block text-sm font-medium text-slate-700"
+                                        >
+                                            Pickup location
+                                        </label>
+
+                                        <input
+                                            id="pickup"
+                                            type="text"
+                                            value={pickup}
+                                            onFocus={() => setActiveLocationField('pickup')}
+                                            onChange={event => {
+                                                setPickup(event.target.value)
+                                                setPickupCoordinates(null)
+                                                setRouteInfo(null)
+                                                setActiveLocationField('pickup')
+                                            }}
+                                            placeholder="Enter your pickup location"
+                                            className="w-full rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-500/10"
+                                        />
+
+                                        {activeLocationField === 'pickup' &&
+                                            pickupSuggestions.length > 0 && (
+                                                <div className="absolute left-0 right-0 top-full z-[100] mt-2 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
+                                                    {pickupSuggestions.map((suggestion, index) => (
+                                                        <button
+                                                            key={`${suggestion.label}-${index}`}
+                                                            type="button"
+                                                            onMouseDown={event => event.preventDefault()}
+                                                            onClick={() =>
+                                                                handleSelectLocation('pickup', suggestion)
+                                                            }
+                                                            className="flex w-full items-start gap-3 rounded-lg px-3 py-3 text-left transition hover:bg-blue-50"
+                                                        >
+                                                            <span className="mt-0.5 text-blue-600">●</span>
+                                                            <span className="text-sm text-slate-700">
+                                                                {suggestion.label}
+                                                            </span>
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                    </div>
+                                </div>
+
+                                <div className="ml-5 h-5 border-l-2 border-dashed border-slate-300" />
+
+                                {/* Destination */}
+                                <div className="flex gap-4">
+                                    <div className="mt-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-indigo-100 bg-indigo-50 text-indigo-600">
+                                        ◆
+                                    </div>
+
+                                    <div className="relative min-w-0 flex-1">
+                                        <label
+                                            htmlFor="destination"
+                                            className="mb-2 block text-sm font-medium text-slate-700"
+                                        >
+                                            Destination
+                                        </label>
+
+                                        <input
+                                            id="destination"
+                                            type="text"
+                                            value={destination}
+                                            onFocus={() =>
+                                                setActiveLocationField('destination')
+                                            }
+                                            onChange={event => {
+                                                setDestination(event.target.value)
+                                                setDestinationCoordinates(null)
+                                                setRouteInfo(null)
+                                                setActiveLocationField('destination')
+                                            }}
+                                            placeholder="Where are you heading?"
+                                            className="w-full rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-500/10"
+                                        />
+
+                                        {activeLocationField === 'destination' &&
+                                            destinationSuggestions.length > 0 && (
+                                                <div className="absolute left-0 right-0 top-full z-[100] mt-2 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
+                                                    {destinationSuggestions.map((suggestion, index) => (
+                                                        <button
+                                                            key={`${suggestion.label}-${index}`}
+                                                            type="button"
+                                                            onMouseDown={event => event.preventDefault()}
+                                                            onClick={() =>
+                                                                handleSelectLocation(
+                                                                    'destination',
+                                                                    suggestion
+                                                                )
+                                                            }
+                                                            className="flex w-full items-start gap-3 rounded-lg px-3 py-3 text-left transition hover:bg-blue-50"
+                                                        >
+                                                            <span className="mt-0.5 text-indigo-600">◆</span>
+                                                            <span className="text-sm text-slate-700">
+                                                                {suggestion.label}
+                                                            </span>
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                    </div>
                                 </div>
                             </div>
-
-                            <div className="mt-7 space-y-4 border-t border-slate-100 pt-5">
-                                <div className="flex items-center justify-between gap-3 text-sm">
-                                    <span className="text-slate-500">Account type</span>
-                                    <span className="font-medium text-slate-700">
-                                        Personal
-                                    </span>
-                                </div>
-
-                                <div className="flex items-center justify-between gap-3 text-sm">
-                                    <span className="text-slate-500">Session</span>
-                                    <span className="font-medium text-emerald-600">
-                                        Active
-                                    </span>
-                                </div>
-                            </div>
-
-                            <p className="mt-7 text-sm leading-6 text-slate-500">
-                                Manage your profile and account settings through your profile menu.
-                            </p>
-
-                            <button
-                                type="button"
-                                onClick={() => setIsProfileEditorOpen(true)}
-                                className="mt-6 w-full rounded-xl bg-blue-400 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
-                            >
-                                Edit profile
-                            </button>
-                        </div>
-
-                        {/* Ride Options */}
+                        </>
+                    }
+                    rideOptions={
                         <RideOptions
                             routeInfo={routeInfo}
                             pickup={pickup}
@@ -1313,11 +1460,13 @@ function UserDashboard() {
                             clerkId={user?.id}
                             onRideBooked={handleRideBooked}
                         />
-                    </div>
+                    }
+                />
                 </section>
 
+
                 {/* Ride History */}
-                <section className="mt-8 rounded-3xl border border-slate-200 bg-white p-6 shadow-lg shadow-slate-900/[0.03] sm:p-8">
+                <section id='my-rides' className="mt-8 rounded-3xl border border-slate-200 bg-white p-6 shadow-lg shadow-slate-900/[0.03] sm:p-8">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
                             <p className="text-xs font-bold uppercase tracking-widest text-blue-600">
@@ -1364,11 +1513,11 @@ function UserDashboard() {
                             </p>
                         </div>
                     ) : (
-                        <div className="mt-7 space-y-4">
+                        <div className="mt-7 grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
                             {paginatedRides.map(ride => (
                                 <article
                                     key={ride.id}
-                                    className="overflow-hidden rounded-2xl border border-slate-200 bg-white transition duration-200 hover:border-blue-200 hover:shadow-md"
+                                    className="flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white transition duration-200 hover:border-blue-200 hover:shadow-md"
                                 >
                                     {/* Ride header */}
                                     <div className="flex flex-wrap items-center justify-between gap-4 p-4 sm:p-5">
@@ -1406,8 +1555,8 @@ function UserDashboard() {
 
                                             <span
                                                 className={`mt-2 inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold capitalize ${ride.status === 'completed'
-                                                        ? 'bg-emerald-50 text-emerald-700'
-                                                        : 'bg-amber-50 text-amber-700'
+                                                    ? 'bg-emerald-50 text-emerald-700'
+                                                    : 'bg-amber-50 text-amber-700'
                                                     }`}
                                             >
                                                 {ride.status === 'completed' && '✓ '}
@@ -1415,48 +1564,6 @@ function UserDashboard() {
                                             </span>
                                         </div>
                                     </div>
-
-                                    {/* Payment and receipt actions */}
-                                    {ride.status === 'completed' && (
-                                        <div className="flex flex-wrap items-center justify-between gap-3 border-y border-slate-100 bg-slate-50/70 px-4 py-3 sm:px-5">
-                                            <div>
-                                                {paymentStatuses[ride.id] === 'paid' ? (
-                                                    <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700">
-                                                        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-xs">
-                                                            ✓
-                                                        </span>
-                                                        Payment completed
-                                                    </span>
-                                                ) : (
-                                                    <div className="text-sm font-medium text-slate-600">
-                                                        Payment pending
-                                                    </div>
-                                                )}
-                                            </div>
-
-                                            <div className="flex flex-wrap items-center gap-2">
-                                                {paymentStatuses[ride.id] !== 'paid' && (
-                                                    <RazorpayCheckout
-                                                        ride={ride}
-                                                        onPaymentSuccess={handlePaymentSuccess}
-                                                        onPaymentError={message => window.alert(message)}
-                                                    />
-                                                )}
-
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handleEmailReceipt(ride.id)}
-                                                    disabled={sendingReceiptId === ride.id}
-                                                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-white px-3.5 py-2 text-sm font-semibold text-blue-700 transition hover:border-blue-300 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
-                                                >
-                                                    <span aria-hidden="true">✉</span>
-                                                    {sendingReceiptId === ride.id
-                                                        ? 'Sending...'
-                                                        : 'Email receipt'}
-                                                </button>
-                                            </div>
-                                        </div>
-                                    )}
 
                                     {/* Journey route */}
                                     <div className="p-4 sm:p-5">
@@ -1492,154 +1599,127 @@ function UserDashboard() {
                                                 </div>
                                             </div>
                                         </div>
+                                    </div>
 
-                                        {/* Rating and review */}
-                                        {ride.status === 'completed' && (
-                                            <div className="mt-4 rounded-2xl border border-slate-200 p-4 sm:p-5">
-                                                {reviewedRideIds.includes(ride.id) ? (
-                                                    <div>
-                                                        <div className="flex flex-wrap items-center justify-between gap-2">
-                                                            <div className="flex items-center gap-2">
-                                                                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-50">
-                                                                    <span className="text-lg text-amber-500">
-                                                                        ★
-                                                                    </span>
-                                                                </div>
-                                                                <div>
-                                                                    <h4 className="text-sm font-bold text-slate-900">
-                                                                        Your feedback
-                                                                    </h4>
-                                                                    <p className="mt-0.5 text-xs text-slate-500">
-                                                                        Thanks for riding with RideFlow
-                                                                    </p>
-                                                                </div>
-                                                            </div>
 
-                                                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
-                                                                ✓ Submitted
+                                    {/* Payment and receipt actions */}
+                                    <div className="mt-auto border-t border-slate-100 bg-slate-50/70 px-4 py-3 sm:px-5">
+                                        {ride.status === 'completed' ? (
+                                            <>
+                                                {/* Payment Status */}
+                                                <div className="mb-3 min-h-5">
+                                                    {paymentStatuses[ride.id] === 'paid' ? (
+                                                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
+                                                            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-xs">
+                                                                ✓
                                                             </span>
+                                                            Payment completed
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-xs font-medium text-slate-600">
+                                                            Payment pending
+                                                        </span>
+                                                    )}
+                                                </div>
+
+                                                {/* Side-by-side Actions */}
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    {paymentStatuses[ride.id] !== 'paid' ? (
+                                                        <div className="min-w-0 [&_button]:!flex [&_button]:!h-[46px] [&_button]:!w-full [&_button]:!items-center [&_button]:!justify-center [&_button]:!rounded-xl [&_button]:!px-2 [&_button]:!py-3 [&_button]:!text-sm">
+                                                            <RazorpayCheckout
+                                                                ride={ride}
+                                                                onPaymentSuccess={handlePaymentSuccess}
+                                                                onPaymentError={message => window.alert(message)}
+                                                            />
                                                         </div>
-
-                                                        <div className="mt-4 flex flex-wrap items-center gap-3">
-                                                            <span className="text-lg tracking-wider text-amber-400">
-                                                                {'★'.repeat(reviewRatings[ride.id] || 0)}
-                                                                {'☆'.repeat(
-                                                                    5 - (reviewRatings[ride.id] || 0)
-                                                                )}
+                                                    ) : (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleEmailReceipt(ride.id)}
+                                                            disabled={sendingReceiptId === ride.id}
+                                                            className="inline-flex h-[46px] min-w-0 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-white px-2 py-3 text-sm font-semibold text-blue-700 transition hover:border-blue-300 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+                                                        >
+                                                            <span aria-hidden="true">✉</span>
+                                                            <span className="truncate">
+                                                                {sendingReceiptId === ride.id
+                                                                    ? 'Sending...'
+                                                                    : 'Email receipt'}
                                                             </span>
-                                                            <span className="text-xs font-semibold text-slate-500">
-                                                                {reviewRatings[ride.id] || 0}/5
-                                                            </span>
-                                                        </div>
+                                                        </button>
+                                                    )}
 
-                                                        {reviewTexts[ride.id] && (
-                                                            <p className="mt-2 text-sm leading-6 text-slate-600">
-                                                                “{reviewTexts[ride.id]}”
-                                                            </p>
-                                                        )}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setActiveReviewRideId(ride.id)}
+                                                        className="group flex h-[46px] min-w-0 items-center justify-center gap-1.5 rounded-xl border border-blue-200/80 bg-gradient-to-r from-blue-50 to-indigo-50 px-2 py-3 text-sm font-semibold text-blue-700 transition hover:border-blue-300 hover:from-blue-100 hover:to-indigo-100"
+                                                    >
+                                                        <span className="text-lg">
+                                                            {reviewedRideIds.includes(ride.id) ? '★' : '☆'}
+                                                        </span>
+                                                        <span className="truncate">
+                                                            {reviewedRideIds.includes(ride.id)
+                                                                ? 'View Feedback'
+                                                                : 'Leave a Review'}
+                                                        </span>
+                                                    </button>
+                                                </div>
+                                            </>
+
+                                        ) : (
+                                            /* Status information for rides without payment actions */
+                                            <div className="flex min-h-[80px] items-center">
+                                                <div
+                                                    className={`flex w-full items-center gap-3 rounded-xl border p-3 ${ride.status === 'accepted'
+                                                        ? 'border-blue-100 bg-blue-50/70'
+                                                        : ride.status === 'cancelled'
+                                                            ? 'border-red-100 bg-red-50/70'
+                                                            : 'border-amber-100 bg-amber-50/70'
+                                                        }`}
+                                                >
+                                                    <div
+                                                        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-lg ${ride.status === 'accepted'
+                                                            ? 'bg-blue-100 text-blue-700'
+                                                            : ride.status === 'cancelled'
+                                                                ? 'bg-red-100 text-red-700'
+                                                                : 'bg-amber-100 text-amber-700'
+                                                            }`}
+                                                    >
+                                                        {ride.status === 'accepted'
+                                                            ? '✓'
+                                                            : ride.status === 'cancelled'
+                                                                ? '×'
+                                                                : '◷'}
                                                     </div>
-                                                ) : (
-                                                    <div>
-                                                        <div className="flex items-start gap-3">
-                                                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50">
-                                                                <span className="text-xl text-blue-600">
-                                                                    ☆
-                                                                </span>
-                                                            </div>
-                                                            <div>
-                                                                <h4 className="text-sm font-bold text-slate-900">
-                                                                    How was your ride?
-                                                                </h4>
-                                                                <p className="mt-1 text-xs leading-5 text-slate-500">
-                                                                    Rate your experience and share feedback
-                                                                    with RideFlow.
-                                                                </p>
-                                                            </div>
-                                                        </div>
 
-                                                        <div className="mt-4 flex flex-wrap items-center gap-1">
-                                                            {[1, 2, 3, 4, 5].map(star => (
-                                                                <button
-                                                                    key={star}
-                                                                    type="button"
-                                                                    aria-label={`Rate ${star} out of 5 stars`}
-                                                                    aria-pressed={
-                                                                        reviewRatings[ride.id] === star
-                                                                    }
-                                                                    onClick={() =>
-                                                                        setReviewRatings(previous => ({
-                                                                            ...previous,
-                                                                            [ride.id]: star,
-                                                                        }))
-                                                                    }
-                                                                    className={`flex h-10 w-10 items-center justify-center rounded-xl text-2xl transition hover:scale-105 ${star <= (reviewRatings[ride.id] || 0)
-                                                                            ? 'bg-amber-50 text-amber-400'
-                                                                            : 'text-slate-300 hover:bg-slate-50 hover:text-amber-300'
-                                                                        }`}
-                                                                >
-                                                                    ★
-                                                                </button>
-                                                            ))}
+                                                    <div className="min-w-0">
+                                                        <p
+                                                            className={`text-sm font-bold ${ride.status === 'accepted'
+                                                                ? 'text-blue-900'
+                                                                : ride.status === 'cancelled'
+                                                                    ? 'text-red-900'
+                                                                    : 'text-amber-900'
+                                                                }`}
+                                                        >
+                                                            {ride.status === 'accepted'
+                                                                ? 'Your ride has been accepted'
+                                                                : ride.status === 'cancelled'
+                                                                    ? 'This ride was cancelled'
+                                                                    : 'Waiting for driver acceptance'}
+                                                        </p>
 
-                                                            <span className="ml-2 text-xs font-medium text-slate-500">
-                                                                {reviewRatings[ride.id]
-                                                                    ? `${reviewRatings[ride.id]} out of 5`
-                                                                    : 'Tap to rate'}
-                                                            </span>
-                                                        </div>
-
-                                                        <textarea
-                                                            value={reviewTexts[ride.id] || ''}
-                                                            onChange={event =>
-                                                                setReviewTexts(previous => ({
-                                                                    ...previous,
-                                                                    [ride.id]: event.target.value.slice(0, 1000),
-                                                                }))
-                                                            }
-                                                            maxLength={1000}
-                                                            rows={2}
-                                                            placeholder="Add a comment (optional)"
-                                                            className="mt-3 w-full resize-y rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-3 text-sm leading-6 text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-50"
-                                                        />
-
-                                                        <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-                                                            <p className="text-xs text-slate-400">
-                                                                {(reviewTexts[ride.id] || '').length}/1000
-                                                                characters
-                                                            </p>
-
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => handleSubmitReview(ride.id)}
-                                                                disabled={
-                                                                    !reviewRatings[ride.id] ||
-                                                                    submittingReviewId === ride.id
-                                                                }
-                                                                className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 hover:shadow disabled:cursor-not-allowed disabled:opacity-50"
-                                                            >
-                                                                {submittingReviewId === ride.id
-                                                                    ? 'Submitting...'
-                                                                    : 'Submit review'}
-                                                                {submittingReviewId !== ride.id && (
-                                                                    <span aria-hidden="true">→</span>
-                                                                )}
-                                                            </button>
-                                                        </div>
+                                                        <p className="mt-1 text-xs leading-5 text-slate-600">
+                                                            {ride.status === 'accepted'
+                                                                ? 'Your ride request has been accepted.'
+                                                                : ride.status === 'cancelled'
+                                                                    ? 'This ride is no longer active.'
+                                                                    : 'Your ride request has been submitted.'}
+                                                        </p>
                                                     </div>
-                                                )}
+                                                </div>
                                             </div>
                                         )}
-
-                                        {/* Full booking reference */}
-                                        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3">
-                                            <span className="text-xs text-slate-400">
-                                                Booking reference
-                                            </span>
-                                            <span className="break-all font-mono text-xs font-medium text-slate-500">
-                                                {ride.id}
-                                            </span>
-                                        </div>
                                     </div>
+
                                 </article>
                             ))}
                         </div>
@@ -1677,6 +1757,175 @@ function UserDashboard() {
                         </div>
                     )}
 
+
+                    {/* Ride Feedback Modal */}
+                    {activeReviewRideId && (() => {
+                        const ride = rides.find(
+                            item => item.id === activeReviewRideId
+                        )
+
+                        if (!ride) return null
+
+                        const hasReviewed = reviewedRideIds.includes(ride.id)
+                        const rating = reviewRatings[ride.id] || 0
+                        const review = reviewTexts[ride.id] || ''
+
+                        return (
+                            <div
+                                className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-slate-900/50 px-4 py-3 backdrop-blur-sm"
+                                onClick={() => setActiveReviewRideId(null)}
+                            >
+                                <div
+                                    role="dialog"
+                                    aria-modal="true"
+                                    aria-labelledby="review-modal-title"
+                                    className="my-auto w-full max-w-md rounded-2xl bg-white px-7 py-5 shadow-2xl sm:px-8"
+                                    onClick={event => event.stopPropagation()}
+                                >
+                                    {/* Modal Header */}
+                                    <div className="flex items-start justify-between gap-4">
+                                        <div>
+                                            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-50 text-2xl">
+                                                {hasReviewed ? '⭐' : '💬'}
+                                            </div>
+
+                                            <h3
+                                                id="review-modal-title"
+                                                className="mt-4 text-xl font-bold text-slate-900"
+                                            >
+                                                {hasReviewed
+                                                    ? 'Your ride review'
+                                                    : 'How was your ride?'}
+                                            </h3>
+
+                                            <p className="mt-1 text-sm text-slate-500">
+                                                {hasReviewed
+                                                    ? 'Thanks for sharing your experience!'
+                                                    : 'Your feedback helps us improve RideFlow.'}
+                                            </p>
+                                        </div>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => setActiveReviewRideId(null)}
+                                            aria-label="Close review modal"
+                                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                                        >
+                                            ×
+                                        </button>
+                                    </div>
+
+                                    {/* Rating */}
+                                    <div className="mt-6">
+                                        <p className="text-sm font-semibold text-slate-800">
+                                            Rate your experience
+                                        </p>
+
+                                        <div className="mt-3 flex items-center justify-center gap-2">
+                                            {[1, 2, 3, 4, 5].map(star => (
+                                                <button
+                                                    key={star}
+                                                    type="button"
+                                                    disabled={hasReviewed}
+                                                    aria-label={`Rate ${star} out of 5 stars`}
+                                                    aria-pressed={rating === star}
+                                                    onClick={() =>
+                                                        setReviewRatings(previous => ({
+                                                            ...previous,
+                                                            [ride.id]: star,
+                                                        }))
+                                                    }
+                                                    className={`flex h-12 w-12 items-center justify-center rounded-xl text-3xl transition ${star <= rating
+                                                        ? 'bg-amber-50 text-amber-400'
+                                                        : 'text-slate-300'
+                                                        } ${hasReviewed
+                                                            ? 'cursor-default'
+                                                            : 'hover:scale-110 hover:bg-amber-50 hover:text-amber-400'
+                                                        }`}
+                                                >
+                                                    {star <= rating ? '★' : '☆'}
+                                                </button>
+                                            ))}
+                                        </div>
+
+                                        <p className="mt-2 text-center text-sm font-medium text-slate-500">
+                                            {rating
+                                                ? `${rating} out of 5 stars`
+                                                : 'Tap a star to rate'}
+                                        </p>
+                                    </div>
+
+                                    {/* Review Text */}
+                                    <div className="mt-5">
+                                        <label
+                                            htmlFor="ride-review-text"
+                                            className="text-sm font-semibold text-slate-800"
+                                        >
+                                            Your review
+                                            {!hasReviewed && (
+                                                <span className="font-normal text-slate-400">
+                                                    {' '}
+                                                </span>
+                                            )}
+                                        </label>
+
+                                        <textarea
+                                            id="ride-review-text"
+                                            value={review}
+                                            readOnly={hasReviewed}
+                                            onChange={event =>
+                                                setReviewTexts(previous => ({
+                                                    ...previous,
+                                                    [ride.id]: event.target.value.slice(0, 1000),
+                                                }))
+                                            }
+                                            maxLength={1000}
+                                            rows={4}
+                                            placeholder="Tell us about your experience..."
+                                            className="mt-2 w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-50 read-only:cursor-default"
+                                        />
+
+                                        {!hasReviewed && (
+                                            <p className="mt-1 text-right text-xs text-slate-400">
+                                                {review.length}/1000 characters
+                                            </p>
+                                        )}
+                                    </div>
+
+                                    {/* Modal Actions */}
+                                    <div className="mt-6 flex gap-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => setActiveReviewRideId(null)}
+                                            className="flex-1 rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                                        >
+                                            {hasReviewed ? 'Close' : 'Cancel'}
+                                        </button>
+
+                                        {!hasReviewed && (
+                                            <button
+                                                type="button"
+                                                onClick={async () => {
+                                                    await handleSubmitReview(ride.id)
+
+                                                    setActiveReviewRideId(null)
+                                                }}
+                                                disabled={
+                                                    !rating ||
+                                                    submittingReviewId === ride.id
+                                                }
+                                                className="flex-1 rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                            >
+                                                {submittingReviewId === ride.id
+                                                    ? 'Submitting...'
+                                                    : 'Submit review'}
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )
+                    })()}
                 </section>
             </main>
 

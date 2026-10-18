@@ -1,4 +1,3 @@
-
 import { useCallback, useEffect, useState } from 'react'
 import {
     MapContainer,
@@ -26,11 +25,8 @@ const DefaultIcon = L.icon({
 
 L.Marker.prototype.options.icon = DefaultIcon
 
-// Search an address without restricting it to Mohali.
 async function geocodeAddress(address) {
-    const url = new URL(
-        'https://nominatim.openstreetmap.org/search'
-    )
+    const url = new URL('https://nominatim.openstreetmap.org/search')
 
     url.search = new URLSearchParams({
         q: address,
@@ -55,7 +51,6 @@ async function geocodeAddress(address) {
         )
     }
 
-    // Use the first search result; the user can correct it with the map.
     return {
         point: L.latLng(
             Number(results[0].lat),
@@ -65,12 +60,9 @@ async function geocodeAddress(address) {
     }
 }
 
-// Resolve a map point to a readable address when possible.
 async function reverseGeocode(point) {
     try {
-        const url = new URL(
-            'https://nominatim.openstreetmap.org/reverse'
-        )
+        const url = new URL('https://nominatim.openstreetmap.org/reverse')
 
         url.search = new URLSearchParams({
             lat: String(point.lat),
@@ -190,10 +182,14 @@ function RouteLayer({ routePoints, onRouteFound, onRouteError }) {
 export default function LocationPicker({
     pickup,
     destination,
+    pickupCoordinates,
+    destinationCoordinates,
     onPickupChange,
     onDestinationChange,
     onCoordinatesChange,
     onRouteInfoChange,
+    locationFields,
+    rideOptions,
 }) {
     const [pickupPoint, setPickupPoint] = useState(null)
     const [destinationPoint, setDestinationPoint] = useState(null)
@@ -240,28 +236,33 @@ export default function LocationPicker({
         onRouteInfoChange?.(null)
         setRoutePoints(null)
 
-        const label = await reverseGeocode(point)
-        const readableAddress =
-            label ||
-            `Pinned location (${point.lat.toFixed(6)}, ${point.lng.toFixed(6)})`
+        try {
+            const label = await reverseGeocode(point)
 
-        if (selectionMode === 'pickup') {
-            setPickupPoint(point)
-            onPickupChange?.(readableAddress)
-            updateCoordinates(point, destinationPoint)
-            setSelectionMode('destination')
-        } else {
-            setDestinationPoint(point)
-            onDestinationChange?.(readableAddress)
-            updateCoordinates(pickupPoint, point)
+            const readableAddress =
+                label ||
+                `Pinned location (${point.lat.toFixed(6)}, ${point.lng.toFixed(6)})`
+
+            if (selectionMode === 'pickup') {
+                setPickupPoint(point)
+                onPickupChange?.(readableAddress)
+                updateCoordinates(point, destinationPoint)
+                setSelectionMode('destination')
+            } else {
+                setDestinationPoint(point)
+                onDestinationChange?.(readableAddress)
+                updateCoordinates(pickupPoint, point)
+            }
+        } finally {
+            setPinLoading(false)
         }
-
-        setPinLoading(false)
     }
 
     async function handleShowRoute() {
-        if (!pickup.trim() || !destination.trim()) {
-            setError('Enter both addresses or select both points on the map.')
+        if (!pickup?.trim() || !destination?.trim()) {
+            setError(
+                'Enter both addresses or select both points on the map.'
+            )
             return
         }
 
@@ -272,39 +273,75 @@ export default function LocationPicker({
         setRoutePoints(null)
 
         try {
+            // Prefer map-selected points, then coordinates from autocomplete.
+            // Only geocode the text when neither source provides coordinates.
+
+            const pickupLat =
+                pickupCoordinates?.lat ?? pickupCoordinates?.latitude
+            const pickupLng =
+                pickupCoordinates?.lng ?? pickupCoordinates?.longitude
+
+            const destinationLat =
+                destinationCoordinates?.lat ??
+                destinationCoordinates?.latitude
+            const destinationLng =
+                destinationCoordinates?.lng ??
+                destinationCoordinates?.longitude
+
             let nextPickup = pickupPoint
             let nextDestination = destinationPoint
 
-
-            if (!nextPickup || !nextDestination) {
-                const pickupResult = nextPickup
-                    ? null
-                    : await geocodeAddress(pickup.trim())
-
-                nextPickup = nextPickup || pickupResult.point
-
-                if (!nextDestination) {
-                    await new Promise(resolve => setTimeout(resolve, 1100))
-
-                    const destinationResult = await geocodeAddress(
-                        destination.trim()
-                    )
-
-                    nextDestination = destinationResult.point
-                }
-
-                setPickupPoint(nextPickup)
-                setDestinationPoint(nextDestination)
-
-                updateCoordinates(nextPickup, nextDestination)
+            if (
+                !nextPickup &&
+                pickupLat != null &&
+                pickupLng != null &&
+                Number.isFinite(Number(pickupLat)) &&
+                Number.isFinite(Number(pickupLng))
+            ) {
+                nextPickup = L.latLng(
+                    Number(pickupLat),
+                    Number(pickupLng)
+                )
             }
 
+            if (
+                !nextDestination &&
+                destinationLat != null &&
+                destinationLng != null &&
+                Number.isFinite(Number(destinationLat)) &&
+                Number.isFinite(Number(destinationLng))
+            ) {
+                nextDestination = L.latLng(
+                    Number(destinationLat),
+                    Number(destinationLng)
+                )
+            }
+
+            if (!nextPickup) {
+                const pickupResult = await geocodeAddress(pickup.trim())
+                nextPickup = pickupResult.point
+            }
+
+            if (!nextDestination) {
+                await new Promise(resolve => setTimeout(resolve, 1100))
+
+                const destinationResult = await geocodeAddress(
+                    destination.trim()
+                )
+
+                nextDestination = destinationResult.point
+            }
 
             if (nextPickup.distanceTo(nextDestination) < 10) {
                 throw new Error(
                     'Pickup and destination must be at different locations.'
                 )
             }
+
+            setPickupPoint(nextPickup)
+            setDestinationPoint(nextDestination)
+
+            updateCoordinates(nextPickup, nextDestination)
 
             setRoutePoints([nextPickup, nextDestination])
         } catch (err) {
@@ -318,157 +355,183 @@ export default function LocationPicker({
     }
 
     return (
-        <div className="mt-6 space-y-5">
-            <div>
-                <h3 className="font-semibold text-slate-800">
-                    Your route
-                </h3>
-                <p className="mt-1 text-sm text-slate-500">
-                    Search addresses or select your pickup and destination on the map.
-                </p>
-            </div>
+        <div className="relative z-0 mt-8 grid min-w-0 items-start gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+            {/* LEFT COLUMN: Location inputs and route controls */}
+            <div className="min-w-0 rounded-3xl border border-slate-200/80 bg-white p-4 shadow-lg shadow-slate-900/[0.03] sm:p-6 lg:p-8">
+                {locationFields}
 
-            <div className="grid gap-3 sm:grid-cols-2">
-                <button
-                    type="button"
-                    onClick={() => setSelectionMode('pickup')}
-                    className={`rounded-xl border px-4 py-3 text-sm font-semibold ${selectionMode === 'pickup'
-                            ? 'border-blue-600 bg-blue-50 text-blue-700'
-                            : 'border-slate-200 bg-white text-slate-600'
-                        }`}
-                >
-                    1. Select pickup
-                </button>
+                <div className="mt-12 space-y-5">
+                    <div>
+                        <p className="text-xs font-semibold uppercase tracking-widest text-blue-600">
+                            ROUTE CONTROLS
+                        </p>
 
-                <button
-                    type="button"
-                    onClick={() => setSelectionMode('destination')}
-                    className={`rounded-xl border px-4 py-3 text-sm font-semibold ${selectionMode === 'destination'
-                            ? 'border-blue-600 bg-blue-50 text-blue-700'
-                            : 'border-slate-200 bg-white text-slate-600'
-                        }`}
-                >
-                    2. Select destination
-                </button>
-            </div>
+                        <h3 className="mt-3 text-xl font-bold text-slate-900">
+                            Your route
+                        </h3>
 
-            <p className="rounded-xl bg-blue-50 p-3 text-sm text-blue-800">
-                Map mode: {selectionMode === 'pickup' ? 'Pickup' : 'Destination'}.
-                Click the map to place the selected pin.
-            </p>
-
-            {pinLoading && (
-                <p className="text-sm text-slate-500">
-                    Looking up the selected map point...
-                </p>
-            )}
-
-            <button
-                type="button"
-                onClick={handleShowRoute}
-                disabled={loading || pinLoading}
-                className="w-full rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
-            >
-                {loading ? 'Locating addresses...' : 'Show route'}
-            </button>
-
-            {error && (
-                <div
-                    role="alert"
-                    className="break-words rounded-xl border border-red-100 bg-red-50 p-3 text-sm text-red-700"
-                >
-                    <p>{error}</p>
-                    <p className="mt-1">
-                        You can select the location directly on the map instead.
-                    </p>
-                </div>
-            )}
-
-            {routeInfo && (
-                <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
-                    <div className="grid grid-cols-2 gap-4">
-                        <div>
-                            <p className="text-xs font-medium text-blue-600">
-                                TOTAL DISTANCE
-                            </p>
-                            <p className="mt-1 text-xl font-bold text-slate-900">
-                                {routeInfo.distanceKm.toFixed(1)} km
-                            </p>
-                        </div>
-
-                        <div>
-                            <p className="text-xs font-medium text-blue-600">
-                                ROUTE ETA
-                            </p>
-                            <p className="mt-1 text-xl font-bold text-slate-900">
-                                {Math.round(routeInfo.durationMinutes)} min
-                            </p>
-                        </div>
+                        <p className="mt-2 text-sm leading-6 text-slate-500">
+                            Choose which location to pin, then select the
+                            corresponding point on the map.
+                        </p>
                     </div>
 
-                    <p className="mt-3 text-xs leading-5 text-slate-500">
-                        Estimates depend on the routing provider and do not include live traffic.
+                    <div className="grid gap-3 sm:grid-cols-2">
+                        <button
+                            type="button"
+                            onClick={() => setSelectionMode('pickup')}
+                            className={`rounded-xl border px-4 py-5 text-sm font-semibold transition ${selectionMode === 'pickup'
+                                    ? 'border-blue-600 bg-blue-50 text-blue-700'
+                                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                                }`}
+                        >
+                            Select pickup
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={() => setSelectionMode('destination')}
+                            className={`rounded-xl border px-4 py-5 text-sm font-semibold transition ${selectionMode === 'destination'
+                                    ? 'border-blue-600 bg-blue-50 text-blue-700'
+                                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                                }`}
+                        >
+                            Select destination
+                        </button>
+                    </div>
+
+                    <p className="rounded-xl bg-blue-50 p-3 text-sm leading-6 text-blue-800">
+                        Map mode:{' '}
+                        <strong>
+                            {selectionMode === 'pickup'
+                                ? 'Pickup'
+                                : 'Destination'}
+                        </strong>
+                        . Click the map to place the selected pin.
                     </p>
+
+                    {pinLoading && (
+                        <p className="text-sm text-slate-500">
+                            Looking up the selected map point...
+                        </p>
+                    )}
+
+                    <button
+                        type="button"
+                        onClick={handleShowRoute}
+                        disabled={loading || pinLoading}
+                        className="w-full rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                        {loading ? 'Locating addresses...' : 'Show route'}
+                    </button>
+
+                    {error && (
+                        <div
+                            role="alert"
+                            className="break-words rounded-xl border border-red-100 bg-red-50 p-3 text-sm text-red-700"
+                        >
+                            <p>{error}</p>
+                            <p className="mt-1">
+                                You can select the location directly on the
+                                map instead.
+                            </p>
+                        </div>
+                    )}
+
+                    {routeInfo && (
+                        <div className="rounded-2xl border border-blue-100 bg-blue-50 p-3">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <p className="text-xs font-medium text-blue-600 ps-3">
+                                        TOTAL DISTANCE
+                                    </p>
+                                    <p className="mt-1 text-xl font-bold text-slate-900 ps-4">
+                                        {routeInfo.distanceKm.toFixed(1)} km
+                                    </p>
+                                </div>
+
+                                <div>
+                                    <p className="text-xs font-medium text-blue-600 ps-4">
+                                        ROUTE ETA
+                                    </p>
+                                    <p className="mt-1 text-xl font-bold text-slate-900 ps-4">
+                                        {Math.round(routeInfo.durationMinutes)} min
+                                    </p>
+                                </div>
+                            </div>
+
+                            <p className="mt-3 text-xs leading-5 text-slate-500 ps-3">
+                                Estimates depend on the routing provider and do
+                                not include live traffic.
+                            </p>
+                        </div>
+                    )}
                 </div>
-            )}
+            </div>
 
-            <MapContainer
-                center={[31.326, 75.576]}
-                zoom={8}
-                style={{
-                    height: '380px',
-                    width: '100%',
-                    borderRadius: '16px',
-                }}
-                scrollWheelZoom
-            >
-                <TileLayer
-                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                />
+            {/* RIGHT COLUMN: Map followed by ride options */}
+            <div className="min-w-0 space-y-6">
+                <div className="min-w-0 overflow-hidden rounded-3xl border border-slate-200/80 bg-white p-3 shadow-lg shadow-slate-900/[0.03] sm:p-4">
+                    <div className="mb-3 px-1 pt-1">
+                        <h3 className="text-lg font-bold text-slate-900">
+                            Route map
+                        </h3>
+                        <p className="mt-1 text-sm text-slate-500">
+                            Select locations and view your route here.
+                        </p>
+                    </div>
 
-                <MapClickHandler
-                    enabled={!loading && !pinLoading}
-                    onLocationSelected={handleMapClick}
-                />
+                    <MapContainer
+                        center={[31.326, 75.576]}
+                        zoom={8}
+                        style={{
+                            height: '380px',
+                            width: '100%',
+                            borderRadius: '16px',
+                        }}
+                        scrollWheelZoom
+                    >
+                        <TileLayer
+                            attribution='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                        />
 
-                <MapFocus
-                    point={
-                        selectionMode === 'pickup'
-                            ? pickupPoint
-                            : destinationPoint
-                    }
-                />
+                        <MapClickHandler
+                            enabled={!loading && !pinLoading}
+                            onLocationSelected={handleMapClick}
+                        />
 
-                {pickupPoint && (
-                    <Marker position={pickupPoint}>
-                        <Popup>Selected pickup location</Popup>
-                    </Marker>
-                )}
+                        <MapFocus
+                            point={
+                                selectionMode === 'pickup'
+                                    ? pickupPoint
+                                    : destinationPoint
+                            }
+                        />
 
-                {destinationPoint && (
-                    <Marker position={destinationPoint}>
-                        <Popup>Selected destination</Popup>
-                    </Marker>
-                )}
+                        {pickupPoint && (
+                            <Marker position={pickupPoint}>
+                                <Popup>Selected pickup location</Popup>
+                            </Marker>
+                        )}
 
-                {routePoints && (
-                    <RouteLayer
-                        routePoints={routePoints}
-                        onRouteFound={handleRouteFound}
-                        onRouteError={handleRouteError}
-                    />
-                )}
-            </MapContainer>
+                        {destinationPoint && (
+                            <Marker position={destinationPoint}>
+                                <Popup>Selected destination</Popup>
+                            </Marker>
+                        )}
 
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                <h4 className="font-semibold text-slate-800">
-                    Other ways to travel
-                </h4>
-                <p className="mt-1 text-sm leading-6 text-slate-500">
-                    Walking and public transport directions are not integrated.
-                    The current routing provider supplies road-route estimates.
-                </p>
+                        {routePoints && (
+                            <RouteLayer
+                                routePoints={routePoints}
+                                onRouteFound={handleRouteFound}
+                                onRouteError={handleRouteError}
+                            />
+                        )}
+                    </MapContainer>
+                </div>
+
+                {rideOptions}
             </div>
         </div>
     )
