@@ -1923,9 +1923,32 @@ function UserDashboard() {
                 </section>
             </main>
 
-            <footer className="border-t border-blue-100 bg-white px-5 py-6 text-center text-sm text-slate-500">
-                © {new Date().getFullYear()} RideFlow. Made for smoother journeys.
+
+
+            <footer className="border-t border-blue-100 bg-white px-5 py-7">
+                <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-3 sm:flex-row">
+                    <p className="text-sm text-slate-500">
+                        © {new Date().getFullYear()}{" "}
+                        <a
+                            href="#home"
+                            className="font-bold text-blue-600 transition-colors hover:text-blue-800 "
+                        >
+                            RideFlow.
+                        </a>{" "}
+                        Made for smoother journeys.
+                    </p>
+
+                    <p className="text-sm text-slate-500">
+                        Crafted with care by{" "}
+                        <span className="font-semibold text-slate-800">
+                            Ishita Verma
+                        </span>{" "}
+                        <span aria-hidden="true">💙</span>
+                    </p>
+                </div>
             </footer>
+
+
 
             {isProfileEditorOpen && (
                 <ProfileEditor
