@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { useUser } from '@clerk/clerk-react'
+import { useAuth, useUser } from '@clerk/clerk-react'
 const API_URL = 'http://localhost:5000/api'
 
 function ProfileEditor({ onClose }) {
     const { user } = useUser()
+    const { getToken } = useAuth()
 
     const [firstName, setFirstName] = useState(user?.firstName || '')
     const [lastName, setLastName] = useState(user?.lastName || '')
@@ -53,10 +54,13 @@ function ProfileEditor({ onClose }) {
                 lastName: lastName.trim(),
             })
 
+            const token = await getToken()
+
             const response = await fetch(`${API_URL}/users`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
                 },
                 body: JSON.stringify({
                     clerk_id: user.id,
@@ -155,14 +159,14 @@ function ProfileEditor({ onClose }) {
     }
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-900/40 p-4 backdrop-blur-sm">
-            <div className="my-auto w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl sm:p-8">
-                <div className="mb-6 flex items-start justify-between gap-4">
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4">
+            <div className="my-auto max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl sm:p-6">
+                <div className="mb-4 flex items-start justify-between gap-4">
                     <div>
                         <p className="text-xs font-bold uppercase tracking-[0.18em] text-blue-600">
                             ACCOUNT SETTINGS
                         </p>
-                        <h2 className="mt-2 text-2xl font-bold text-slate-900">
+                        <h2 className="mt-2 text-xl font-bold text-slate-900">
                             Edit your profile
                         </h2>
                         <p className="mt-1 text-sm text-slate-500">
@@ -180,7 +184,7 @@ function ProfileEditor({ onClose }) {
                     </button>
                 </div>
 
-                <form onSubmit={handleSaveProfile} className="space-y-5">
+                <form onSubmit={handleSaveProfile} className="space-y-4">
                     <div className="flex items-center gap-4">
                         <img
                             src={preview || 'https://placehold.co/96x96/eaf1ff/2563eb?text=User'}
@@ -191,7 +195,7 @@ function ProfileEditor({ onClose }) {
                         <div>
                             <label
                                 htmlFor="profile-image"
-                                className="inline-flex cursor-pointer rounded-xl bg-blue-400 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700"
+                                className="inline-flex cursor-pointer rounded-xl bg-blue-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700"
                             >
                                 Choose photo
                             </label>
@@ -238,17 +242,17 @@ function ProfileEditor({ onClose }) {
                     <button
                         type="submit"
                         disabled={loading}
-                        className="w-full rounded-xl bg-blue-400 px-5 py-3 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                        className="w-full rounded-xl bg-blue-500 px-5 py-2 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                         {loading ? 'Saving...' : 'Save profile'}
                     </button>
                 </form>
 
-                <div className="my-6 border-t border-slate-100" />
+                <div className="my-4 border-t border-slate-100" />
 
                 <form
                     onSubmit={phoneResource ? handleVerifyPhone : handleSendCode}
-                    className="space-y-4"
+                    className="space-y-3"
                 >
                     <div>
                         <h3 className="font-semibold text-slate-900">Phone number</h3>
@@ -323,8 +327,11 @@ function ProfileEditor({ onClose }) {
                 </form>
 
                 {message && (
-                    <p role="status" className="mt-5 rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-                        {message}
+                    <p
+                        role="status"
+                        className="mt-1 text-center text-xs font-medium text-emerald-600"
+                    >
+                        ✓ {message}
                     </p>
                 )}
 
@@ -333,14 +340,6 @@ function ProfileEditor({ onClose }) {
                         {error}
                     </p>
                 )}
-
-                <button
-                    type="button"
-                    onClick={onClose}
-                    className="mt-5 w-full rounded-xl px-5 py-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
-                >
-                    Done
-                </button>
             </div>
         </div>
     )

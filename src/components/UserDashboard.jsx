@@ -144,6 +144,7 @@ function UserDashboard() {
     const [rides, setRides] = useState([])
     const [ridesLoading, setRidesLoading] = useState(true)
     const [ridesError, setRidesError] = useState('')
+    const [isRideStreamConnected, setIsRideStreamConnected] = useState(false)
     const [currentRidePage, setCurrentRidePage] = useState(1)
     const RIDES_PER_PAGE = 4
 
@@ -351,15 +352,17 @@ function UserDashboard() {
 
         fetchRides()
 
-        // Check for ride-status changes every 10 seconds.
-        const interval = setInterval(fetchRides, 10000)
+        // Check for ride-status changes every 30 seconds.
+        const interval = setInterval(
+            fetchRides,
+            isRideStreamConnected ? 60000 : 30000
+        )
 
         return () => {
             cancelled = true
             clearInterval(interval)
         }
-    }, [user?.id])
-
+    }, [user?.id, isRideStreamConnected])
 
     function handleRideBooked(ride) {
         if (!ride) return
@@ -512,6 +515,7 @@ function UserDashboard() {
                 }
 
                 console.log('Ride stream: connected to the response.')
+                setIsRideStreamConnected(true)
 
                 const reader = response.body.getReader()
                 const decoder = new TextDecoder()
@@ -597,7 +601,11 @@ function UserDashboard() {
                         }
                     }
                 }
+
+                setIsRideStreamConnected(false)
             } catch (error) {
+                setIsRideStreamConnected(false)
+
                 if (error.name !== 'AbortError') {
                     console.error('Ride stream error:', error)
                 }
@@ -898,7 +906,7 @@ function UserDashboard() {
         return () => {
             cancelled = true
         }
-    }, [user, getToken, API_URL])
+    }, [user?.id, getToken])
 
 
 
@@ -1132,25 +1140,13 @@ function UserDashboard() {
                         </div>
 
                         <UserButton>
-                            <UserButton.UserProfilePage
-                                label="Edit profile"
-                                url="edit-profile"
-                                labelIcon={<span>✏️</span>}
-                            >
-                                <div className="p-4">
-                                    <p className="text-sm text-slate-600">
-                                        Manage your RideFlow profile from your dashboard.
-                                    </p>
-
-                                    <button
-                                        type="button"
-                                        onClick={() => setIsProfileEditorOpen(true)}
-                                        className="mt-3 w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
-                                    >
-                                        Open profile editor
-                                    </button>
-                                </div>
-                            </UserButton.UserProfilePage>
+                            <UserButton.MenuItems>
+                                <UserButton.Action
+                                    label="Edit profile"
+                                    labelIcon={<span>✏️</span>}
+                                    onClick={() => setIsProfileEditorOpen(true)}
+                                />
+                            </UserButton.MenuItems>
                         </UserButton>
                     </div>
                 </div>
@@ -1772,8 +1768,7 @@ function UserDashboard() {
 
                         return (
                             <div
-                                className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-slate-900/50 px-4 py-3 backdrop-blur-sm"
-                                onClick={() => setActiveReviewRideId(null)}
+                                className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-slate-900/50 px-4 py-3 backdrop-blur-sm" onClick={() => setActiveReviewRideId(null)}
                             >
                                 <div
                                     role="dialog"
@@ -1897,8 +1892,7 @@ function UserDashboard() {
                                         <button
                                             type="button"
                                             onClick={() => setActiveReviewRideId(null)}
-                                            className="flex-1 rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                                        >
+                                            className="flex-1 rounded-xl bg-blue-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"                                        >
                                             {hasReviewed ? 'Close' : 'Cancel'}
                                         </button>
 
@@ -1940,7 +1934,7 @@ function UserDashboard() {
             )}
 
             {isClearNotificationsModalOpen && (
-                <div className="fixed inset-0 z-[1100] flex items-center justify-center bg-slate-900/40 px-5 backdrop-blur-sm">
+                <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/40 px-5 backdrop-blur-sm">
                     <div
                         role="alertdialog"
                         aria-modal="true"
