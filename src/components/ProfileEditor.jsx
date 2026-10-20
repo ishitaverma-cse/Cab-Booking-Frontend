@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useAuth, useUser } from '@clerk/clerk-react'
-const API_URL = 'http://localhost:5000/api'
+const API_URL = 'https://cab-booking-backend-exx6.onrender.com/api'
 
 function ProfileEditor({ onClose }) {
     const { user } = useUser()

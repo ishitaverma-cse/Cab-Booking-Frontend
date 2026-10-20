@@ -138,7 +138,7 @@ function UserDashboard() {
     const [activeLocationField, setActiveLocationField] = useState('')
 
     const API_URL = (
-        import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+        import.meta.env.VITE_API_URL || 'https://cab-booking-backend-exx6.onrender.com/api'
     ).replace(/\/+$/, '')
 
     const [rides, setRides] = useState([])
